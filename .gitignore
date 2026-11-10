@@ -16,4 +16,5 @@ selection_manifest.txt
 verify_jorge_vs_v1.py
 /.devcontainer/
 /legacy_scripts/
+configs/params_analysis.yml
 
