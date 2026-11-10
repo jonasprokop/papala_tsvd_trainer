@@ -82,7 +82,9 @@ def extract_features(root: Path, table: pd.DataFrame, cache: Path,
         with np.load(cache) as d:
             if not np.array_equal(d['unit_instance_ids'], ids):
                 raise ValueError('Feature cache does not match unit inventory; use --recompute-features')
-            return (d['waveforms'].astype(float), d['amplitudes'].astype(float),
+            if d['waveforms'].dtype != np.float64 or d['amplitudes'].dtype != np.float64:
+                raise ValueError('Lossy legacy feature cache; run with --recompute-features')
+            return (d['waveforms'], d['amplitudes'],
                     d['isi_histograms'].astype(float), d['n_isi'].astype(int))
     features = {}
     for k, session in enumerate(sorted(table.session.unique(), key=parse_session), start=1):
@@ -114,8 +116,8 @@ def extract_features(root: Path, table: pd.DataFrame, cache: Path,
     cache.parent.mkdir(parents=True, exist_ok=True)
     # Cache only compact features, not the huge spike time arrays.
     with cache.open('wb') as f:
-        np.savez_compressed(f, unit_instance_ids=ids, waveforms=wave.astype('f4'),
-                            amplitudes=ampl.astype('f4'),
+        np.savez_compressed(f, unit_instance_ids=ids, waveforms=wave,
+                            amplitudes=ampl,
                             isi_histograms=isi.astype('f4'), n_isi=n_isi)
     return wave, ampl, isi, n_isi
 
