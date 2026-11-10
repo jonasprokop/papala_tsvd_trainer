@@ -1,0 +1,117 @@
+project:
+  name: tvsd-sinz-shared-core
+  output_root: /project/tvsd_search/runs
+  sqlite_path: /project/tvsd_search/results.sqlite
+  result_sheet_path: /project/tvsd_search/runs.csv
+data:
+  kind: tvsd
+  root: /project/data/processed/ks4_v1/model_dataset_v1
+  dataset_module_path: /project/scripts/tvsd_dataset.py
+  image_root: /project/data/assets/THINGS
+  preprocessing:
+    expected_output_hw:
+    - 224
+    - 224
+    normalization_path: /project/configs/tvsd_normalization.json
+    colorspace: grayscale-replicated
+  loader:
+    batch_size: 64
+    num_workers: 4
+    pin_memory: true
+  split:
+    train_fraction: 0.9
+    seed: 8000
+    algorithm: frozen_tvsd_dataset_v1
+model:
+  backbone:
+    model_id: facebook/convnextv2-atto-1k-224
+    revision: 2a62c34e37c1092d9a99cba587d5428837495d7c
+  core:
+    output_channels: 80
+    output_hw:
+    - 28
+    - 28
+    batchnorm_momentum: 0.9
+  readout:
+    outdims: 733
+    init_mu_range: 0.4
+    init_sigma: 0.6
+    gauss_type: isotropic
+    batch_sample: true
+    align_corners: true
+    bias: true
+    outdims_by_animal:
+      F: 451
+      N: 282
+  output:
+    elu_offset: -1.0
+training:
+  ensemble_members: 5
+  member_seeds:
+  - 8000
+  - 8001
+  - 8002
+  - 8003
+  - 8004
+  total_epochs: 200
+  readout_only_epochs: 20
+  phase1_lr: 0.005
+  phase2_lr: 0.0005
+  scheduler:
+    enabled: true
+    name: ReduceLROnPlateau
+    mode: max
+    factor: 0.1
+    patience: 10
+    threshold: 1.0e-06
+    min_lr: 1.0e-06
+    threshold_mode: abs
+    enable_phase1: false
+    max_lr_decays: 3
+    reset_at_phase2: true
+  optimizer:
+    name: AdamW
+    weight_decay: 0.01
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    reset_at_phase2: false
+  loss:
+    eps: 1.0e-08
+    reduction: historical_sum_scaled
+    gamma_readout: 10.0
+  checkpoint:
+    monitor: val_corr_mean
+    mode: max
+    use_best_for_test: true
+    save_latest_every_epoch: true
+    archive_every_epochs: 20
+    atomic_writes: true
+    resume_granularity: completed_epoch
+  phase1_freeze:
+    freeze_core_parameters: true
+    freeze_batchnorm_running_stats: false
+    provenance: 'Paper explicitly freezes core weights for epochs 0-19; BatchNorm
+      running-stat behavior is not specified. Default replication choice: full core
+      train-mode statistics update until epoch 20.'
+  progress:
+    enabled: true
+    heartbeat_every_batches: 25
+    eta_window_epochs: 5
+    show_gpu_memory: true
+  shuffle:
+    algorithm: torch DataLoader shuffle
+    epoch_seed_rule: member_dataloader_seed + epoch
+    provenance: explicit reproducibility choice for exact epoch-boundary restart;
+      not claimed as historical SGD ordering
+evaluation:
+  primary_metric: corr_to_average
+  save_predictions: false
+reproducibility:
+  cudnn_benchmark: false
+  cudnn_deterministic: false
+  cuda_matmul_allow_tf32: false
+  cudnn_allow_tf32: true
+  deterministic_algorithms: false
+  full_dataset_sha256: false

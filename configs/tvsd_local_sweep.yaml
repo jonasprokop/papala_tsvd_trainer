@@ -1,0 +1,5 @@
+# Use only after choosing a founder on validation; values are illustrative.
+# Existing sweep command performs Cartesian product and full replicates.
+sweep:
+  training.phase2_lr: [0.0003, 0.0005, 0.0007]
+  training.optimizer.weight_decay: [0.0003, 0.001, 0.003]

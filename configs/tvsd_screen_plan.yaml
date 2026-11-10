@@ -1,0 +1,17 @@
+# Controlled, one-change-at-a-time TVSD screen. Baseline is always first.
+candidates:
+- name: gamma_low
+  overrides:
+    training.loss.gamma_readout: 1.0
+- name: gamma_high
+  overrides:
+    training.loss.gamma_readout: 100.0
+- name: sigma_narrow
+  overrides:
+    model.readout.init_sigma: 0.2
+- name: sigma_mid
+  overrides:
+    model.readout.init_sigma: 0.4
+- name: phase2_lr_lower
+  overrides:
+    training.phase2_lr: 0.0003

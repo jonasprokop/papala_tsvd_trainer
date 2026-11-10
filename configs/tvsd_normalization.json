@@ -1,0 +1,13 @@
+{
+  "input_hw": [
+    224,
+    224
+  ],
+  "max_images": null,
+  "mean": 0.5018756807626669,
+  "n_images": 20023,
+  "n_pixels": 1004674048,
+  "preprocessing": "rgb_resize_bicubic_then_luma",
+  "source_partition": "train",
+  "std": 0.25226737284015427
+}

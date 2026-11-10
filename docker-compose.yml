@@ -1,0 +1,53 @@
+# Use from VS Code Remote-SSH on the GPU host, or docker compose in a terminal.
+# No published ports, privileged mode, host networking, or Docker-socket mount.
+name: sinz-tvsd
+services:
+  tvsd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sinz-tvsd:sinz-core-cu117
+    container_name: papale_roelfsema_sinz_model_adaptation_jonas_prokop_gpu0
+    working_dir: /project
+    user: "${TVSD_UID:-1000}:${TVSD_GID:-1000}"
+    init: true
+    stdin_open: true
+    tty: true
+    shm_size: "8gb"
+    entrypoint: ["/bin/sleep"]
+    command: ["infinity"]
+    restart: "no"
+    environment:
+      HOME: /project/data/cache/vscode-home
+      PYTHONPATH: /project
+      PYTHONUNBUFFERED: "1"
+      HF_HOME: /project/data/cache/huggingface
+      HF_HUB_CACHE: /project/data/cache/huggingface/hub
+      TRANSFORMERS_CACHE: /project/data/cache/huggingface/hub
+      TORCH_HOME: /project/data/cache/torch
+      V1_CUDNN_BENCHMARK: "0"
+      V1_CUDNN_DETERMINISTIC: "0"
+      V1_MATMUL_TF32: "0"
+      V1_CUDNN_TF32: "1"
+    volumes:
+      - type: bind
+        source: .
+        target: /project
+      - type: bind
+        source: ${TVSD_SOURCE:-/CSNG/Ephys_data/Macaque_data/TVSD_data}
+        target: /source/tvsd
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TVSD_WORKDIR:-./data}
+        target: /project/data
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]

@@ -1,0 +1,17 @@
+.env
+__pycache__/
+.pytest_cache/
+*.pyc
+/data/
+/reports/
+/runs/
+/cache/
+/jorge_tvsd_preprocessing/
+core
+/.venv-katka/
+.env
+tvsd_search
+selection_manifest.txt
+verify_jorge_vs_v1.py
+/.devcontainer/
+

@@ -1,0 +1,3 @@
+# Runtime bind mounts, never embed recordings, weights, or the trainer in the image.
+**
+!Dockerfile

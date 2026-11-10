@@ -1,0 +1,31 @@
+# Alternative broad RANDOM search; use tvsd_screen_plan.yaml for first run.
+search:
+  training.phase2_lr:
+    type: loguniform
+    low: 0.0002
+    high: 1e-3
+  training.optimizer.weight_decay:
+    type: loguniform
+    low: 1.0e-06
+    high: 0.01
+  training.phase1_lr:
+    type: loguniform
+    low: 1e-3
+    high: 1e-2
+  training.scheduler.patience:
+    type: choice
+    values:
+    - 3
+    - 5
+    - 8
+    - 10
+  training.loss.gamma_readout:
+    type: loguniform
+    low: 0.3
+    high: 300.0
+  model.readout.init_sigma:
+    type: choice
+    values:
+    - 0.2
+    - 0.4
+    - 0.6
