@@ -137,8 +137,8 @@ def summarize_tracks(root: Path) -> dict:
         raise ValueError('Duplicate labels or track membership')
     if set(labels.unit_instance_id) != set(membership.unit_instance_id):
         raise ValueError('Labels and track membership cover different unit sets')
-    grouped = membership.merge(labels[['unit_instance_id', 'session', 'final_class']],
-                               on='unit_instance_id', validate='one_to_one')
+    grouped = membership.merge(labels[['unit_instance_id', 'final_class']],
+                            on='unit_instance_id', validate='one_to_one')
     if selected.unit_instance_id.duplicated().any():
         raise ValueError('Duplicate selected unit membership')
     selected_ids = selected[['unit_instance_id', 'neuron_index', 'neuron_id']]

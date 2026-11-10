@@ -30,7 +30,7 @@ echo "=== 6/9 SUMMARIZE WAVEFORM CLASSES (NO LABEL VETO) ==="
 python -u scripts/waveform_classes.py summarize --root "$ROOT"
 
 echo "=== 7/9 BUILD DATASET ==="
-python -u scripts/dataset.py prepare --processed-root "$ROOT" --images-root "$IMAGES" --output-dir "$ROOT/model_dataset"
+python -u scripts/dataset.py prepare --processed-root "$ROOT" --images-root "$IMAGES" --output-dir "$ROOT/model_dataset" --overwrite
 
 echo "=== 8/9 MATLAB GRAYSCALE NORMALIZATION ==="
 python -u scripts/calibrate_normalization.py --dataset-root "$ROOT/model_dataset" --image-size 224
