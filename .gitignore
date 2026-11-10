@@ -7,6 +7,7 @@ __pycache__/
 /runs/
 /cache/
 /jorge_tvsd_preprocessing/
+/scripts_waveform_data/
 core
 /.venv-katka/
 .env
@@ -14,4 +15,5 @@ tvsd_search
 selection_manifest.txt
 verify_jorge_vs_v1.py
 /.devcontainer/
+/legacy_scripts/
 

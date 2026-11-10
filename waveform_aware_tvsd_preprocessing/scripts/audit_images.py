@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Audit TVSD stimulus identities and optionally resolve to a local THINGS image tree.
 
-Reads trial metadata produced by build_ks4_v1.py, never modifies it.
+Reads trial metadata produced by extract_ks4.py, never modifies it.
 One stimulus identity is (split, image_index), NEVER just image_index.
 
 Usage:
-    python scripts/audit_tvsd_images.py
-    python scripts/audit_tvsd_images.py --images-root /project/data/assets/THINGS
+    python scripts/audit_images.py
+    python scripts/audit_images.py --images-root /project/data/assets/THINGS
 """
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ import re
 
 import numpy as np
 import pandas as pd
+from PIL import Image
+from constants import EXPECTED_SESSIONS
 
 SUPPORTED_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}
 IMAGE_COLUMNS = ('THINGS_image_path', 'NIN_local_path')
@@ -43,11 +45,11 @@ def path_parts(s):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--processed-root', type=Path,
-                   default=Path('/project/data/processed/ks4_v1'))
+                   default=Path('/project/data/processed/tvsd_waveform_aware_v1'))
     p.add_argument('--output-dir', type=Path, default=None)
     p.add_argument('--images-root', type=Path, default=None,
                    help='Extracted THINGS image directory; resolution is optional.')
-    p.add_argument('--expected-sessions', type=int, default=45)
+    p.add_argument('--expected-sessions', type=int, default=EXPECTED_SESSIONS)
     a = p.parse_args()
     trial_dir = a.processed_root / 'trials'
     files = sorted(trial_dir.glob('*.csv'))
@@ -208,6 +210,20 @@ def main():
         print('\nImage resolution:')
         print(unique['resolution_status'].value_counts().to_string())
         print('Image root:', root)
+        nonsquare = []
+        for rel in sorted(set(unique.loc[unique.resolution_status.eq('resolved'),
+                                         'image_relative_path'])):
+            with Image.open(root / rel) as im:
+                w, h = im.size
+            if w != h:
+                nonsquare.append(dict(image_relative_path=rel, width=w, height=h))
+        pd.DataFrame(nonsquare, columns=['image_relative_path', 'width', 'height']).to_csv(
+            out / 'nonsquare_images.csv', index=False)
+        if nonsquare:
+            raise ValueError(f'{len(nonsquare)} non-square THINGS images found; '
+                             '224x224 resize would distort aspect ratio. '
+                             'See images/nonsquare_images.csv')
+        print('Original image shapes: all resolved files are square.')
         if unique['resolution_status'].eq('resolved').all() and not reuse:
             print('All stimulus IDs resolved. Ready for a separate pixel/transform QA.')
         else:

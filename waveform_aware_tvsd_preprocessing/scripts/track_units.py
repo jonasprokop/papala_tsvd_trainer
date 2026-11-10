@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Label-aware, DAY-FIRST chronic-unit tracking for the filtered TVSD KS4 data.
+"""Exploratory, DAY-FIRST chronic-unit tracking for the filtered TVSD KS4 data.
 
 Signals: z-scored waveform shape, log firing rate, ISI-distribution Hellinger
-similarity, raw waveform amplitude, and full rebuilt Katka labels (conservative
-polarity veto and small within-polarity adjustment only). Hungarian one-to-one assignments with
+similarity, and raw waveform amplitude. Hungarian one-to-one assignments with
 an explicit unmatched option, competition margins, and same-session exclusion.
 
 Stage 1: reconstruct tracks within one recording day.
 Stage 2: compare those daily tracks across dates within each physical electrode.
 
-Nothing is written back to the original inventory, Katka references or NPZs.
+Nothing is written back to the original inventory or response NPZs.
 All output IDs are *proposals*, never verified biological identities.
 
 Run (inside the TVSD Docker project):
-    python scripts/track_ks4_joint_labeled.py
-    python scripts/track_ks4_joint_labeled.py --rate-weights 1 2 3
-    python scripts/track_ks4_joint_labeled.py --root /project/data/processed/ks4_v1
+    python scripts/track_units.py
+    python scripts/track_units.py --rate-weights 1 2 3
+    python scripts/track_units.py --root /project/data/processed/tvsd_waveform_aware_v1
 
 Requires numpy, pandas, scipy. Reads original ragged spike times from existing
 session NPZs; never reopens NIX or reprocesses images.
@@ -23,6 +22,7 @@ session NPZs; never reopens NIX or reprocesses images.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
-ROOT = Path('/project/data/processed/ks4_v1')
+ROOT = Path('/project/data/processed/tvsd_waveform_aware_v1')
 # Rate-normalized ISIs: preserves firing-pattern shape without counting mean
 # firing rate twice (FR is scored explicitly in log space).
 ISI_EDGES_REL = np.geomspace(0.025, 20.0, 24)
@@ -131,7 +131,6 @@ class Profile:
     last_day: str
     sessions: set[str]
     days: set[str]
-    classes: tuple[str, ...]
 
 
 def aggregate(members: list[int], table: pd.DataFrame, wave: np.ndarray,
@@ -153,39 +152,13 @@ def aggregate(members: list[int], table: pd.DataFrame, wave: np.ndarray,
     amplitude = float(np.median(amplitudes)) if len(amplitudes) else np.nan
     sessions = set(sub.session.astype(str))
     days = {parse_session(s)[1] for s in sessions}
-    if 'final_class' not in sub or sub.final_class.isna().any():
-        raise ValueError('This tracker requires fully labeled unit_instances_labeled.csv')
-    classes = tuple(sorted(sub.final_class.astype(str).unique()))
     return Profile(members.copy(), shape, rate, median_isi, amplitude,
-                   max(days), sessions, days, classes)
+                   max(days), sessions, days)
 
 
-def class_penalty(classes_a: tuple[str, ...], classes_b: tuple[str, ...]) -> float | None:
-    """Waveform-derived labels: weak extra evidence, never a new neuron ID.
-
-    Opposite waveform POLARITY is a strong warning and blocks an automated match.
-    Width and first-peak labels are derived from the same waveforms scored already,
-    so they contribute only a deliberately small disagreement penalty.
-    """
-    left, right = set(classes_a), set(classes_b)
-    if not left or not right:
-        raise ValueError('Missing original Katka waveform class')
-    if ('UP' in left and any(x.startswith('DOWN_') for x in right) or
-        'UP' in right and any(x.startswith('DOWN_') for x in left)):
-        return None
-    if left & right:
-        return 0.0
-    def distance(a: str, b: str) -> float:
-        if a == b: return 0.0
-        if a == 'UP' or b == 'UP': return 0.0 if a == b else 10.0
-        rank = {'narrow': 0, 'medium': 1, 'wide': 2}
-        ap = a.split('_'); bp = b.split('_')
-        w = abs(rank[ap[1]] - rank[bp[1]])
-        return 0.20 * w + (0.10 if len(ap) == 3 and len(bp) == 3 and ap[2] != bp[2] else 0.0)
-    return min(distance(a, b) for a in left for b in right)
-
-
-def match_score(a: Profile, b: Profile, *, cross_day: bool, rate_weight: float):
+def match_score(a: Profile, b: Profile, *, cross_day: bool, rate_weight: float,
+                waveform_weight: float = 1.6, isi_weight: float = 1.0,
+                amplitude_weight: float = 0.35):
     """Heuristic joint evidence, not a calibrated identity probability.
 
     Rate is on a log scale; waveform and amplitude differences permit more
@@ -195,38 +168,37 @@ def match_score(a: Profile, b: Profile, *, cross_day: bool, rate_weight: float):
     r = float(np.dot(a.wave, b.wave)) if np.isfinite(a.wave).all() and np.isfinite(b.wave).all() else np.nan
     if not np.isfinite(r) or r < (0.90 if cross_day else 0.93):
         return None
-    if not (np.isfinite(a.rate) and np.isfinite(b.rate) and a.rate > 0 and b.rate > 0):
+    # A zero rate weight truly switches off firing-rate eligibility, too.
+    valid_rates = (np.isfinite(a.rate) and np.isfinite(b.rate)
+                   and a.rate > 0 and b.rate > 0)
+    if rate_weight > 0 and not valid_rates:
         return None
-    log_fr = abs(float(np.log(a.rate / b.rate)))
-    if (log_fr > (1.6 if cross_day else 1.35)):
-        return None  # reject >~5x change, even when waveforms look identical
+    log_fr = abs(float(np.log(a.rate / b.rate))) if valid_rates else np.nan
+    if rate_weight > 0 and log_fr > (1.6 if cross_day else 1.35):
+        return None  # reject >~5x change only when rate evidence is enabled
     amp_d = (abs(float(np.log(a.amp/b.amp))) if np.isfinite(a.amp) and np.isfinite(b.amp)
              and a.amp > 0 and b.amp > 0 else np.nan)
     if np.isfinite(a.isi).all() and np.isfinite(b.isi).all():
         h = float(np.linalg.norm(np.sqrt(a.isi) - np.sqrt(b.isi)) / np.sqrt(2.0))
     else:
         h = np.nan
-    cls_penalty = class_penalty(a.classes, b.classes)
-    if cls_penalty is None:
-        return None
-    # A linearized distance score. Labels are waveform-derived and receive
-    # only a small adjustment to avoid double-counting the waveform signal.
-    wave_penalty = 1.6 * (1-r) / (0.045 if cross_day else 0.022)
-    rate_penalty = rate_weight * log_fr / (0.78 if cross_day else 0.53)
-    isi_penalty = 1.0 * h / 0.28 if np.isfinite(h) else 0.0
-    amp_penalty = 0.35 * amp_d / (0.85 if cross_day else 0.60) if np.isfinite(amp_d) else 0.0
-    score = 4.5 - wave_penalty - rate_penalty - isi_penalty - amp_penalty - cls_penalty
+    # A linearized distance score. Typical values are inspectable in CSV.
+    wave_penalty = waveform_weight * (1-r) / (0.045 if cross_day else 0.022)
+    rate_penalty = (rate_weight * log_fr / (0.78 if cross_day else 0.53)
+                    if rate_weight > 0 else 0.0)
+    isi_penalty = isi_weight * h / 0.28 if np.isfinite(h) else 0.0
+    amp_penalty = amplitude_weight * amp_d / (0.85 if cross_day else 0.60) if np.isfinite(amp_d) else 0.0
+    score = 4.5 - wave_penalty - rate_penalty - isi_penalty - amp_penalty
     return {'score': score, 'waveform_r': r, 'log_rate_ratio': log_fr,
             'isi_hellinger': h, 'log_amplitude_ratio': amp_d,
             'waveform_penalty': wave_penalty, 'rate_penalty': rate_penalty,
-            'isi_penalty': isi_penalty, 'amplitude_penalty': amp_penalty,
-            'class_penalty': cls_penalty, 'classes_a': ';'.join(a.classes),
-            'classes_b': ';'.join(b.classes)}
+            'isi_penalty': isi_penalty, 'amplitude_penalty': amp_penalty}
 
 
 def hungarian_match(old: list[Profile], new: list[Profile], *, cross_day: bool,
                     rate_weight: float, min_score: float, min_margin: float,
-                    ):
+                    waveform_weight: float = 1.6, isi_weight: float = 1.0,
+                    amplitude_weight: float = 0.35):
     """One-to-one matches with explicit dummy choices, plus competition checks."""
     n, m = len(old), len(new)
     if not n or not m:
@@ -237,7 +209,9 @@ def hungarian_match(old: list[Profile], new: list[Profile], *, cross_day: bool,
         for j, b in enumerate(new):
             if a.sessions & b.sessions or (a.days & b.days and cross_day):
                 continue
-            e = match_score(a, b, cross_day=cross_day, rate_weight=rate_weight)
+            e = match_score(a, b, cross_day=cross_day, rate_weight=rate_weight,
+                            waveform_weight=waveform_weight, isi_weight=isi_weight,
+                            amplitude_weight=amplitude_weight)
             if e is not None:
                 score[i,j] = e['score']
                 evidence[(i,j)] = e
@@ -275,7 +249,9 @@ def hungarian_match(old: list[Profile], new: list[Profile], *, cross_day: bool,
 
 def run(root: Path, table: pd.DataFrame, wave: np.ndarray, amp: np.ndarray, isi: np.ndarray,
         *, rate_weight: float, min_score: float, min_margin: float,
-        outdir: Path, write_details: bool) -> dict:
+        outdir: Path, write_details: bool,
+        waveform_weight: float = 1.6, isi_weight: float = 1.0,
+        amplitude_weight: float = 0.35) -> dict:
     all_daily = []
     all_global = []
     evidence_rows = []
@@ -300,7 +276,9 @@ def run(root: Path, table: pd.DataFrame, wave: np.ndarray, amp: np.ndarray, isi:
                 inds = by_date[date][session]
                 current = [aggregate([k], table, wave, amp, isi) for k in inds]
                 matches, yes, no = hungarian_match(tracks,current,cross_day=False,
-                    rate_weight=rate_weight,min_score=min_score,min_margin=min_margin)
+                    rate_weight=rate_weight,min_score=min_score,min_margin=min_margin,
+                    waveform_weight=waveform_weight,isi_weight=isi_weight,
+                    amplitude_weight=amplitude_weight)
                 for ev in yes:
                     ev.update(stage='within_day', animal=animal,array=array,
                               electrode_id=electrode,date=date,session=session)
@@ -332,7 +310,9 @@ def run(root: Path, table: pd.DataFrame, wave: np.ndarray, amp: np.ndarray, isi:
             batch=[(did,p) for d,did,p in daily if d==date]
             new=[p for _,p in batch]
             matches,yes,no=hungarian_match(global_tracks,new,cross_day=True,
-                rate_weight=rate_weight,min_score=min_score,min_margin=min_margin)
+                rate_weight=rate_weight,min_score=min_score,min_margin=min_margin,
+                    waveform_weight=waveform_weight,isi_weight=isi_weight,
+                    amplitude_weight=amplitude_weight)
             for ev in yes:
                 ev.update(stage='across_days',animal=animal,array=array,
                           electrode_id=electrode,date=date,session='')
@@ -361,7 +341,6 @@ def run(root: Path, table: pd.DataFrame, wave: np.ndarray, amp: np.ndarray, isi:
             s=table.iloc[p.members]
             r=s.firing_rate_hz.to_numpy(dtype=float)
             r=r[np.isfinite(r)&(r>0)]
-            classes=sorted(s.final_class.dropna().astype(str).unique()) if 'final_class' in s else []
             days=sorted({parse_session(x)[1] for x in s.session})
             global_quality.append(dict(candidate_joint_track_id=tid,
                  animal=animal,array=array,electrode_id=electrode,
@@ -369,10 +348,8 @@ def run(root: Path, table: pd.DataFrame, wave: np.ndarray, amp: np.ndarray, isi:
                  n_daily_tracks=len(day_ids), n_sessions=s.session.nunique(),
                  min_pairwise_waveform_r=track_min_r(p,wave),
                  firing_rate_max_min_ratio=(float(max(r)/min(r)) if len(r) else np.nan),
-                 n_katka_classes=len(classes),katka_classes=';'.join(classes),
-                 review_flag=(len(classes)>1 or (len(r)>1 and max(r)/min(r)>3) or
-                              (len(p.members)>1 and track_min_r(p,wave)<0.93)),
-                 n_katka_labeled=int(s.final_class.notna().sum()) if 'final_class' in s else 0))
+                 review_flag=((len(r)>1 and max(r)/min(r)>3) or
+                              (len(p.members)>1 and track_min_r(p,wave)<0.93))))
     day=pd.DataFrame(all_daily,columns=['unit_instance_id','candidate_day_track_id'])
     glob=pd.DataFrame(all_global,columns=['unit_instance_id','candidate_joint_track_id'])
     if len(day)!=len(table) or len(glob)!=len(table) or not day.unit_instance_id.is_unique or not glob.unit_instance_id.is_unique:
@@ -382,12 +359,12 @@ def run(root: Path, table: pd.DataFrame, wave: np.ndarray, amp: np.ndarray, isi:
         raise AssertionError('Collision: two simultaneously recorded units in same proposed track')
     gq=pd.DataFrame(global_quality)
     dq=pd.DataFrame(day_quality)
-    summary=dict(rate_weight=rate_weight,min_score=min_score,min_margin=min_margin,
+    summary=dict(rate_weight=rate_weight,waveform_weight=waveform_weight,
+         isi_weight=isi_weight,amplitude_weight=amplitude_weight,min_score=min_score,min_margin=min_margin,
          n_unit_instances=len(table),n_sites=count_site,lower_bound=lower_bound,
          n_daily_tracks=len(dq),n_global_tracks=len(gq),
          tracks_spanning_multiple_days=int((gq.n_days>1).sum()),
          unit_instances_in_repeat_tracks=int(gq.loc[gq.n_unit_instances>1,'n_unit_instances'].sum()),
-         tracks_with_katka_class_disagreement=int((gq.n_katka_classes>1).sum()),
          tracks_with_rate_ratio_over_3=int((gq.firing_rate_max_min_ratio>3).sum()),
          tracks_flagged_for_review=int(gq.review_flag.sum()),
          n_ambiguous_pair_proposals=len(rejected_rows))
@@ -410,7 +387,9 @@ def track_min_r(p: Profile,wave:np.ndarray)->float:
     return float(rs[ix,jx].min())
 
 
-def negatives(table:pd.DataFrame,wave:np.ndarray,amp:np.ndarray,isi:np.ndarray,weight:float)->pd.DataFrame:
+def negatives(table:pd.DataFrame,wave:np.ndarray,amp:np.ndarray,isi:np.ndarray,weight:float,
+              waveform_weight: float = 1.6, isi_weight: float = 1.0,
+              amplitude_weight: float = 0.35)->pd.DataFrame:
     out=[]
     for _,r in table.groupby(['animal','array','electrode_id','session'],sort=True):
         if len(r)<2:continue
@@ -418,7 +397,9 @@ def negatives(table:pd.DataFrame,wave:np.ndarray,amp:np.ndarray,isi:np.ndarray,w
         ps=[aggregate([idx],table,wave,amp,isi) for idx in indexes]
         for i in range(len(ps)):
             for j in range(i+1,len(ps)):
-                ev=match_score(ps[i],ps[j],cross_day=False,rate_weight=weight)
+                ev=match_score(ps[i],ps[j],cross_day=False,rate_weight=weight,
+                               waveform_weight=waveform_weight,isi_weight=isi_weight,
+                               amplitude_weight=amplitude_weight)
                 if ev is not None:
                     out.append(ev)
     return pd.DataFrame(out)
@@ -427,50 +408,61 @@ def negatives(table:pd.DataFrame,wave:np.ndarray,amp:np.ndarray,isi:np.ndarray,w
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--root',type=Path,default=ROOT)
-    ap.add_argument('--inventory',type=Path,default=None,help='Default: ROOT/unit_instances_labeled.csv')
     ap.add_argument('--rate-weights',nargs='+',type=float,default=[1.,2.,3.],
                     help='Sensitivity sweep for relative firing-rate influence')
     ap.add_argument('--proposal-rate-weight',type=float,default=2.)
+    ap.add_argument('--waveform-weight',type=float,default=1.6)
+    ap.add_argument('--isi-weight',type=float,default=1.0)
+    ap.add_argument('--amplitude-weight',type=float,default=0.35)
     ap.add_argument('--min-score',type=float,default=1.3)
     ap.add_argument('--min-margin',type=float,default=0.5)
     ap.add_argument('--recompute-features',action='store_true')
     args=ap.parse_args()
-    if any(x<=0 for x in args.rate_weights+[args.proposal_rate_weight]):
-        ap.error('Firing-rate weights must be positive')
-    path=args.inventory if args.inventory is not None else args.root/'unit_instances_labeled.csv'
+    if any(x<0 for x in args.rate_weights+[args.proposal_rate_weight,
+           args.waveform_weight,args.isi_weight,args.amplitude_weight]):
+        ap.error('Matching weights must be nonnegative')
+    path=args.root/'unit_instances.csv'
     if not path.exists():raise FileNotFoundError(path)
     table=pd.read_csv(path)
-    required={'unit_instance_id','animal','array','electrode_id','session','firing_rate_hz'}
+    required={'unit_instance_id','animal','array','electrode_id','session',
+              'firing_rate_hz','longitudinal_neuron_id'}
     if required-set(table):raise ValueError(f'Missing columns {required-set(table)}')
     if table.unit_instance_id.duplicated().any():raise ValueError('Duplicate unit IDs')
-    if table.final_class.isna().any():
-        raise ValueError('Some Katka classes are missing; run attach_katka_rebuilt.py first')
-    if len(table) != 11012:
-        print(f'NOTE: {len(table)} original KS4 unit instances, not expected 11012')
     if table.longitudinal_neuron_id.notna().any():
         raise ValueError('Input already contains assigned longitudinal identities')
     table=table.reset_index(drop=True)
     wave,amp,isi,n_isi=extract_features(args.root,table,
             args.root/'identity_diagnostics'/'joint_unit_features.npz',args.recompute_features)
-    outdir=args.root/'identity_diagnostics'/'joint_labeled'
-    print('Computing LABEL-AWARE day-first identity proposals (read only)...',flush=True)
+    outdir=args.root/'identity_diagnostics'/'joint'
+    print('Computing joint day-first identity proposals (read only)...',flush=True)
     sw=[]
     for weight in sorted(set(args.rate_weights+[args.proposal_rate_weight])):
         print(f'\n=== Rate weight {weight:g} ===',flush=True)
         summary=run(args.root,table,wave,amp,isi,rate_weight=weight,
                 min_score=args.min_score,min_margin=args.min_margin,
-                outdir=outdir,write_details=(weight==args.proposal_rate_weight))
+                outdir=outdir,write_details=(weight==args.proposal_rate_weight),
+                waveform_weight=args.waveform_weight,isi_weight=args.isi_weight,
+                amplitude_weight=args.amplitude_weight)
         print(pd.Series(summary).to_string(),flush=True)
         sw.append(summary)
     outdir.mkdir(parents=True,exist_ok=True)
     pd.DataFrame(sw).to_csv(outdir/'joint_rate_weight_sweep.csv',index=False)
-    neg=negatives(table,wave,amp,isi,args.proposal_rate_weight)
+    (outdir/'matching_config.json').write_text(json.dumps({
+        'proposal_rate_weight':args.proposal_rate_weight,
+        'comparison_rate_weights':args.rate_weights,
+        'waveform_weight':args.waveform_weight,'isi_weight':args.isi_weight,
+        'amplitude_weight':args.amplitude_weight,
+        'min_score':args.min_score,'min_margin':args.min_margin,
+        'identity_status':'provisional, unvalidated across sessions'},indent=2)+'\n')
+    neg=negatives(table,wave,amp,isi,args.proposal_rate_weight,
+                  waveform_weight=args.waveform_weight,isi_weight=args.isi_weight,
+                  amplitude_weight=args.amplitude_weight)
     if len(neg):
-        print('\nKnown-distinct simultaneous units passing the waveform/FR gates (conditional sample):')
+        print('\nKnown-distinct simultaneous units passing the enabled eligibility gates (conditional sample):')
         print(neg.score.describe(percentiles=[.5,.9,.95,.99]).to_string())
         print(f'{(neg.score>=args.min_score).mean():.1%} also pass raw joint-score threshold '
               '(they are NEVER eligible for real matches; not an error-rate estimate)')
         neg.to_csv(outdir/'known_distinct_unit_scores.csv',index=False)
-    print(f'\nSaved diagnostics to {outdir}\nNo longitudinal neuron IDs assigned; no unit instances deleted.')
+    print(f'\nSaved diagnostics to {outdir}\nNo longitudinal neuron IDs assigned.')
 
 if __name__=='__main__':main()

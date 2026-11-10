@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Build and load the TVSD THINGS -> KS4 masked-response dataset.
 
-The selected neuronal union is provided by final_trimmed/unit_to_readout.csv.
-No neuron is inferred here. A missing response is ALWAYS masked, never a zero target.
+Each SELECTED provisional longitudinal neuron receives one stable per-animal
+column index, with original KS4 unit UUIDs retained in unit_to_neuron.csv.
+Identity matches are proposals, not ground truth. Absent responses are masked.
 
 Inside the existing project container:
-    python scripts/tvsd_dataset.py prepare
-    python scripts/tvsd_dataset.py check --animal F --partition train
-    python scripts/tvsd_dataset.py check --animal N --partition test
+    python scripts/dataset.py prepare
+    python scripts/dataset.py check --animal F --partition train
+    python scripts/dataset.py check --animal N --partition test
 
 As a Python module:
-    from tvsd_dataset import TVSDDataset
+    from dataset import TVSDDataset
     train = TVSDDataset(animal='F', partition='train', image_size=224)
     batch = next(iter(torch.utils.data.DataLoader(train, batch_size=8)))
 
@@ -27,14 +28,14 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
-from PIL import Image
+from image_transform import image_chw_normalized, MODES
+from constants import EXPECTED_SESSIONS
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-ROOT = Path('/project/data/processed/ks4_v1')
-MAP_DIR = ROOT / 'identity_diagnostics/joint_labeled/selection/final_trimmed'
+ROOT = Path('/project/data/processed/tvsd_waveform_aware_v1')
 IMAGE_ROOT = Path('/project/data/assets/THINGS')
-DEFAULT_PREPARED = ROOT / 'model_dataset_v1'
+DEFAULT_PREPARED = ROOT / 'model_dataset'
 
 
 def _require_columns(df, cols, label):
@@ -80,53 +81,78 @@ def _write_npz_atomic(path: Path, **arrays):
 
 
 def prepare_dataset(
-    *, processed_root: Path = ROOT, map_dir: Path = MAP_DIR,
+    *, processed_root: Path = ROOT,
     image_root: Path = IMAGE_ROOT, output_dir: Path = DEFAULT_PREPARED,
     val_fraction: float = 0.1, seed: int = 8000,
-    expected_sessions: int = 45, overwrite: bool = False,
-    check_images: bool = True,
+    expected_sessions: int = EXPECTED_SESSIONS, overwrite: bool = False,
+    check_images: bool = True, selection_dir: Path | None = None,
 ):
-    """Pack selected response columns; NEVER copy full ragged spike arrays.
+    """Pack responses by selected longitudinal tracks, independently of readout architecture.
 
-    Validates exact session/UUID alignment, stimulus identity and observation masks.
-    Does not modify source NPZs or final neuron assignments.
+    Selection is an explicit, separate, auditable step; here no new identity
+    decision is made. Track index is never a Gaussian readout parameter.
     """
-    processed_root, map_dir, image_root, output_dir = map(Path, (
-        processed_root, map_dir, image_root, output_dir))
-    if output_dir.resolve() in (processed_root.resolve(), map_dir.resolve()):
+    processed_root, image_root, output_dir = map(Path, (
+        processed_root, image_root, output_dir))
+    if output_dir.resolve() == processed_root.resolve():
         raise ValueError('Output must be a separate dataset directory')
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
         raise FileExistsError(f'{output_dir} already exists. Use --overwrite to rebuild.')
-    unit_map = pd.read_csv(map_dir / 'unit_to_readout.csv', low_memory=False)
-    _require_columns(unit_map, ['unit_instance_id', 'session', 'animal', 'readout_index',
-                                'readout_id', 'train_presentations', 'test_presentations'], 'unit map')
-    if unit_map.isna().any().any():
-        raise ValueError('Unit map contains missing fields')
-    if unit_map.unit_instance_id.duplicated().any():
-        raise ValueError('One selected unit_instance_id occurs more than once')
-    if unit_map.duplicated(['session', 'animal', 'readout_index']).any():
-        raise ValueError('Two simultaneously recorded units assigned to the same model readout')
-    if not unit_map.animal.isin(['F', 'N']).all():
-        raise ValueError('Only monkeys F and N are expected')
-    if not (unit_map.animal + '/' + unit_map.readout_index.astype(str) == unit_map.readout_id).all():
-        raise ValueError('Inconsistent animal/readout_id in map')
-    n_readouts = {}
-    for animal, g in unit_map.groupby('animal'):
-        inds = np.sort(g.readout_index.unique())
-        if not np.array_equal(inds, np.arange(len(inds))):
-            raise ValueError(f'{animal}: readout indices are not 0..N-1')
-        n_readouts[animal] = int(len(inds))
-    readout_meta_path = map_dir / 'readout_index.csv'
-    if readout_meta_path.exists():
-        readout_meta = pd.read_csv(readout_meta_path, low_memory=False)
-        _require_columns(readout_meta, ['animal','readout_index','readout_id'], 'readout_index')
-        if readout_meta.duplicated(['animal','readout_index']).any():
-            raise ValueError('Duplicate readout index in readout_index.csv')
-        observed_pairs = set(zip(unit_map.animal,unit_map.readout_index))
-        meta_pairs = set(zip(readout_meta.animal,readout_meta.readout_index))
-        if observed_pairs != meta_pairs:
-            raise ValueError('unit_to_readout.csv and readout_index.csv disagree')
-
+    inventory = pd.read_csv(processed_root / 'unit_instances.csv', low_memory=False)
+    _require_columns(inventory, ['unit_instance_id', 'session', 'animal'], 'KS4 inventory')
+    if not inventory.unit_instance_id.is_unique:
+        raise ValueError('Duplicate KS4 unit_instance_id')
+    selection_dir = Path(selection_dir) if selection_dir else processed_root / 'identity_diagnostics/joint/selection'
+    membership_path = selection_dir / 'unit_to_neuron.csv'
+    neuron_path = selection_dir / 'neuron_index.csv'
+    if not membership_path.is_file() or not neuron_path.is_file():
+        raise FileNotFoundError(f'Missing tracked neuron mapping in {selection_dir}; run select_tracks.py first')
+    selection_config_path = selection_dir / 'selection_config.json'
+    if not selection_config_path.is_file():
+        raise FileNotFoundError(f'Missing selection_config.json in {selection_dir}; run select_tracks.py')
+    selection_config = json.loads(selection_config_path.read_text())
+    for key, relative in [
+        ('source_membership_sha256', 'candidate_joint_unit_membership.csv'),
+        ('source_quality_sha256', 'candidate_joint_track_quality.csv')]:
+        path = processed_root / 'identity_diagnostics/joint' / relative
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != selection_config.get(key):
+            raise ValueError(f'Selected neurons are stale relative to {relative}; rerun select_tracks.py')
+    matching_config_path = processed_root / 'identity_diagnostics/joint/matching_config.json'
+    if selection_config.get('matching_config_sha256'):
+        if (not matching_config_path.is_file() or
+            hashlib.sha256(matching_config_path.read_bytes()).hexdigest() !=
+                selection_config['matching_config_sha256']):
+            raise ValueError('Matching weights/config changed since selection; rerun select_tracks.py')
+    units = pd.read_csv(membership_path, low_memory=False)
+    neurons = pd.read_csv(neuron_path, low_memory=False)
+    _require_columns(units, ['unit_instance_id','session','animal',
+                             'candidate_joint_track_id','neuron_index','neuron_id'], 'unit_to_neuron')
+    _require_columns(neurons, ['animal','candidate_joint_track_id','neuron_index','neuron_id'], 'neuron_index')
+    if units.empty or neurons.empty or units.isna().any().any() or neurons[['animal','neuron_index','neuron_id']].isna().any().any():
+        raise ValueError('Empty or invalid selected neuron mapping')
+    if not units.unit_instance_id.is_unique or units.duplicated(['session','animal','neuron_index']).any():
+        raise ValueError('Duplicate unit or two simultaneous units mapped to one neuron')
+    if not set(units.unit_instance_id).issubset(set(inventory.unit_instance_id)):
+        raise ValueError('Mapped unit missing from original inventory')
+    joined = units.merge(inventory[['unit_instance_id','session','animal']],on='unit_instance_id',
+                         suffixes=('','_original'), validate='one_to_one')
+    if not ((joined.session==joined.session_original)&(joined.animal==joined.animal_original)).all():
+        raise ValueError('Tracked neuron mapping disagrees with original session/animal')
+    if neurons.duplicated(['animal','neuron_index']).any() or neurons.duplicated(['animal','candidate_joint_track_id']).any():
+        raise ValueError('Duplicate neuron_index in neuron selection')
+    if set(zip(units.animal,units.neuron_index)) != set(zip(neurons.animal,neurons.neuron_index)):
+        raise ValueError('Selected neurons and unit-to-neuron mapping disagree')
+    if (units.groupby(['animal','neuron_index']).candidate_joint_track_id.nunique()>1).any():
+        raise ValueError('Different tracks mapped to one neuron index')
+    if not (units.animal+'/'+units.neuron_index.astype(str)==units.neuron_id).all():
+        raise ValueError('Inconsistent neuron IDs')
+    n_neurons = {}
+    for animal, g in neurons.groupby('animal'):
+        ids=np.sort(g.neuron_index.to_numpy(dtype=int))
+        if not np.array_equal(ids,np.arange(len(ids))):
+            raise ValueError(f'{animal}: neuron indices must be 0..N-1')
+        n_neurons[str(animal)]=int(len(ids))
+    units = units.sort_values(['animal','session','neuron_index','unit_instance_id'],kind='stable')
     stimulus = pd.read_csv(processed_root / 'images/stimulus_manifest.csv', low_memory=False)
     pres = pd.read_csv(processed_root / 'images/presentation_to_stimulus.csv', low_memory=False)
     _require_columns(stimulus, ['stimulus_id','split','image_index','resolution_status',
@@ -154,21 +180,31 @@ def prepare_dataset(
             raise FileNotFoundError(f'{len(missing)} stimulus images missing; first: {missing[:3]}')
     partition = _image_partition(stimulus.stimulus_id, val_fraction=val_fraction, seed=seed)
     stimulus_paths = stimulus.set_index('stimulus_id')['image_relative_path'].to_dict()
-    sessions = sorted(pres.session.unique())
-    if len(sessions) != expected_sessions or set(sessions) != set(unit_map.session.unique()):
-        raise ValueError(f'Session coverage mismatch: {len(sessions)} presentations, '
-                         f'{unit_map.session.nunique()} with readouts; expected {expected_sessions}')
+    all_sessions = sorted(pres.session.unique())
+    if expected_sessions and len(all_sessions) != expected_sessions:
+        raise ValueError(f'Expected {expected_sessions} presentation sessions, got {len(all_sessions)}')
+    if set(inventory.session.unique()) != set(all_sessions):
+        raise ValueError('KS4 inventory sessions differ from presentation manifest')
+    sessions = sorted(all_sessions)
     if pres.session.str.extract(r'^macaque([FN])_TVSD_')[0].isna().any():
         raise ValueError('Unexpected session naming in image manifest')
     output_dir.mkdir(parents=True, exist_ok=True)
+    if overwrite:
+        # A rebuilt split/unit inventory requires calibration again, even if
+        # the new split happens to have the same number of images.
+        (output_dir / 'normalization.json').unlink(missing_ok=True)
     records = []
     actual_counts = {}
     observed_train_pairs = 0
     observed_test_pairs = 0
+    common_window = None
     for k, session in enumerate(sessions, start=1):
-        selected = unit_map.loc[unit_map.session.eq(session)].copy()
-        if selected.empty or selected.animal.nunique() != 1:
-            raise ValueError(f'{session}: no units or mixed animals')
+        selected = units.loc[units.session.eq(session)].copy()
+        if selected.empty:
+            print(f'{k:2d}/{len(sessions)} {session}: no selected neuron; skipping session', flush=True)
+            continue
+        if selected.animal.nunique() != 1:
+            raise ValueError(f'{session}: mixed animals in selected mapping')
         animal = str(selected.animal.iloc[0])
         if not session.startswith(f'macaque{animal}_'):
             raise ValueError(f'{session}: monkey does not match session metadata')
@@ -190,18 +226,24 @@ def prepare_dataset(
                 raise ValueError(f'{session}: duplicate source trial rows')
             missing_ids = set(selected.unit_instance_id) - set(original_ids)
             if missing_ids:
-                raise ValueError(f'{session}: mapped unit missing from NPZ: {next(iter(missing_ids))}')
+                raise ValueError(f'{session}: indexed unit missing from NPZ: {next(iter(missing_ids))}')
             columns = {name: i for i,name in enumerate(original_ids)}
-            selected = selected.sort_values('readout_index', kind='stable')
+            selected = selected.sort_values('neuron_index', kind='stable')
             col_indices = np.array([columns[x] for x in selected.unit_instance_id], dtype=int)
-            local_readout_indices = selected.readout_index.to_numpy(dtype=np.int32)
+            local_neuron_indices = selected.neuron_index.to_numpy(dtype=np.int32)
             local_counts = npz['counts'][:, col_indices]
             local_observed = npz['observed'][:, col_indices]
-        if not np.array_equal(response_window, [40.0, 160.0]):
-            raise ValueError(f'{session}: unexpected spike window: {response_window}')
+        if (response_window.shape != (2,) or not np.isfinite(response_window).all()
+                or response_window[0] < 0 or response_window[0] >= response_window[1]):
+            raise ValueError(f'{session}: invalid spike window: {response_window}')
+        if common_window is None:
+            common_window = response_window.copy()
+        elif not np.array_equal(response_window, common_window):
+            raise ValueError(f'{session}: inconsistent spike window {response_window}; '
+                             f'expected {common_window} from first session')
         if (local_counts.shape != local_observed.shape or
             local_counts.shape[0] != len(source_rows) or
-            local_counts.shape[1] != len(local_readout_indices)):
+            local_counts.shape[1] != len(local_neuron_indices)):
             raise ValueError(f'{session}: malformed neural response arrays')
         if (local_counts[~local_observed] != 0).any():
             raise ValueError(f'{session}: unobserved targets have nonzero values')
@@ -213,90 +255,112 @@ def prepare_dataset(
         if not np.array_equal(trial_image_index, ordered.image_index.to_numpy(dtype=np.int64)):
             raise ValueError(f'{session}: image index differs from NPZ')
         assigned_ids = ordered.stimulus_id.to_numpy(dtype=str)
-        # Verify per-session train/test presentation support per unit.
+        # These presentation counts come from actual trial arrays, not model selection.
         local_train = int(np.count_nonzero(trial_split == 'train'))
         local_test = int(np.count_nonzero(trial_split == 'test'))
-        if not (selected.train_presentations.to_numpy() == local_train).all():
-            raise ValueError(f'{session}: selected units disagree on training presentation count')
-        if not (selected.test_presentations.to_numpy() == local_test).all():
-            raise ValueError(f'{session}: selected units disagree on test presentation count')
         for i, (source_row, st_id) in enumerate(zip(source_rows, assigned_ids)):
             records.append(dict(animal=animal, session=session, trial_index=i,
                                 source_row=int(source_row), stimulus_id=st_id,
                                 split=str(trial_split[i]), partition=partition[st_id],
                                 image_index=int(trial_image_index[i]),
                                 image_relative_path=stimulus_paths[st_id]))
-        actual_counts[session] = [local_train, local_test, len(local_readout_indices)]
+        actual_counts[session] = [local_train, local_test, len(local_neuron_indices)]
         observed_train_pairs += int(local_observed[trial_split == 'train'].sum())
         observed_test_pairs += int(local_observed[trial_split == 'test'].sum())
         _write_npz_atomic(output_dir / 'sessions' / f'{session}.npz',
                           counts=local_counts.astype(np.uint16, copy=False),
                           observed=local_observed.astype(bool, copy=False),
-                          readout_indices=local_readout_indices,
+                          neuron_indices=local_neuron_indices,
                           source_rows=source_rows,
                           stimulus_ids=assigned_ids,
                           response_window_ms=response_window)
         print(f'{k:2d}/{len(sessions)} {session}: {len(source_rows)} presentations, '
-              f'{len(local_readout_indices)} selected units', flush=True)
+              f'{len(local_neuron_indices)} tracked neuron observations', flush=True)
     index = pd.DataFrame.from_records(records)
+    split_sha256 = _split_sha256(index)
     index.to_csv(output_dir / 'sample_index.csv', index=False)
-    # Copy the exact inputs into this immutable-by-convention dataset version.
+    neurons.to_csv(output_dir / 'neuron_index.csv', index=False)
+    # Preserve source provenance and allow downstream model-specific selection.
     inputs = {
-        'unit_to_readout.csv': map_dir / 'unit_to_readout.csv',
+        'unit_instances.csv': processed_root / 'unit_instances.csv',
         'stimulus_manifest.csv': processed_root / 'images/stimulus_manifest.csv',
         'presentation_to_stimulus.csv': processed_root / 'images/presentation_to_stimulus.csv',
     }
-    if readout_meta_path.is_file():
-        inputs['readout_index.csv'] = readout_meta_path
+    inputs['unit_to_neuron.csv'] = membership_path
+    inputs['neuron_index.csv'] = neuron_path
+    config_path = selection_dir / 'selection_config.json'
+    if config_path.is_file():
+        inputs['selection_config.json'] = config_path
+    if matching_config_path.is_file():
+        inputs['matching_config.json'] = matching_config_path
     digests = {}
     for name, path in inputs.items():
         shutil.copyfile(path, output_dir / name)
         digests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-    summary = dict(version='tvsd_masked_v1', n_readouts=n_readouts,
-                   n_selected_unit_instances=int(len(unit_map)),
+    summary = dict(version='tvsd_tracked_neurons_masked_v3', n_neurons=n_neurons,
+                   n_source_sessions=len(all_sessions),
+                   n_selected_unit_instances=int(len(units)),
+                   n_original_unit_instances=int(len(inventory)),
                    n_sessions=len(sessions), n_presentations=len(index),
-                   n_nominal_train_response_entries=int(unit_map.train_presentations.sum()),
+                   n_nominal_train_response_entries=int(sum(v[0]*v[2] for v in actual_counts.values())),
                    n_observed_train_response_entries=observed_train_pairs,
                    n_observed_test_response_entries=observed_test_pairs,
                    frozen_input_sha256=digests,
-                   response_window_ms=[40.0,160.0], validation_fraction=val_fraction,
+                   response_window_ms=common_window.tolist(), split_sha256=split_sha256,
+                   validation_fraction=val_fraction,
                    split_seed=seed, image_root=str(image_root.resolve()),
                    session_counts=actual_counts,
-                   # Holdout image IDs are shared across both animals/sessions.
                    partition_images={x: int(index.loc[index.partition.eq(x),'stimulus_id'].nunique())
                                      for x in ('train','val','test')},
                    partition_presentations=index.partition.value_counts().to_dict(),
-                   preprocessing='RGB, PIL bicubic resize to image_size x image_size, float [0,1]; '
-                                 'no stimulus geometry/normalization equivalence assumed')
+                   preprocessing='Full image, PIL bicubic resize, MATLAB/BT.601 grayscale default, '
+                                 'train-only global z-score; no center crop. Other modes explicit.',
+                   identity_note='Columns are selected provisional longitudinal neurons; original unit UUIDs preserved in unit_to_neuron.csv')
     (output_dir / 'dataset_info.json').write_text(json.dumps(summary, indent=2) + '\n')
     print('\nDataset built:', output_dir)
-    print('Readouts:', n_readouts, 'Selected KS4 unit instances:', len(unit_map))
+    print('Selected tracked neurons by animal:', n_neurons, 'Unit instances:', len(units))
     print('Nominal/observed train response entries:',
           summary['n_nominal_train_response_entries'], observed_train_pairs)
     print('Partition images:', summary['partition_images'])
     print('Partition presentations:', summary['partition_presentations'])
-    print('No spike trains, source files, or readout identities modified.')
+    print('No KS4 recordings or provisional identities modified.')
     return summary
 
 
+def _split_sha256(index: pd.DataFrame) -> str:
+    """Fingerprint actual image/split/path mapping, independent of presentations.
+
+    This deliberately includes the complete frozen split, not just the number
+    of images, and detects changes to stimulus-to-file mapping.
+    """
+    required = ['stimulus_id', 'partition', 'image_relative_path']
+    _require_columns(index, required, 'presentation index')
+    unique = index[required].drop_duplicates().sort_values(required, kind='stable')
+    if unique.stimulus_id.duplicated().any() or unique[required].isna().any().any():
+        raise ValueError('Non-unique or missing image split/path assignments')
+    text = json.dumps(unique.values.tolist(), ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
 class TVSDDataset(Dataset):
-    """Per-animal image-presentation dataset with fixed dense readout target axis.
+    """Per-animal image-presentation dataset with stable tracked-neuron columns.
 
     Output dict:
-      image            float32 [3,H,W], RGB [0,1] (no unverified presentation correction)
-      responses        float32 [n_readouts_for_animal], spikes in [40,160) ms
-      response_mask    bool    [n_readouts_for_animal]; absent readouts are false
+      image            float32 [3,H,W], train-global z-scored full image
+      responses        float32 [n_neurons_for_animal], counts in the configured window
+      response_mask    bool    [n_neurons_for_animal]; absent unit instances are false
       stimulus_id      string  'train:N' or 'test:N'
       session          string
       source_row       int
       animal           string
 
-    Use separate dataloaders for F and N; shared core may be trained by alternating them.
+    Use one DataLoader per animal, or filter by session downstream.
+    The neuron axis does not assume or require a Gaussian readout.
     """
     def __init__(self, *, animal: str, partition: str,
                  prepared_root: Path = DEFAULT_PREPARED,
                  image_root: Optional[Path] = None, image_size: int = 224,
-                 load_responses: bool = True):
+                 load_responses: bool = True, normalization_path: Optional[Path] = None):
         self.root = Path(prepared_root)
         if animal not in ('F','N') or partition not in ('train','val','test'):
             raise ValueError('animal must be F/N; partition must be train/val/test')
@@ -304,9 +368,29 @@ class TVSDDataset(Dataset):
             raise ValueError('image_size must be a positive integer')
         self.animal, self.partition, self.image_size = animal, partition, int(image_size)
         info = json.loads((self.root / 'dataset_info.json').read_text())
-        self.n_readouts = int(info['n_readouts'][animal])
+        if animal not in info['n_neurons']:
+            raise ValueError(f'No selected neurons for animal {animal} in this prepared dataset')
+        self.n_neurons = int(info['n_neurons'][animal])
         self.image_root = Path(image_root) if image_root is not None else Path(info['image_root'])
+        norm_path = Path(normalization_path) if normalization_path is not None else self.root/'normalization.json'
+        norm = json.loads(norm_path.read_text())
+        # This is intentionally checked even for an explicit normalization_path:
+        # mismatched calibration and neural/image partitions must not go unnoticed.
+        expected_sha = info.get('split_sha256')
+        if not expected_sha or norm.get('split_sha256') != expected_sha:
+            raise ValueError('Normalization split fingerprint missing/mismatched; '
+                             'recalibrate on this prepared dataset')
+        if norm.get('partial', False):
+            raise ValueError('Partial normalization is for diagnostics only')
+        if norm['image_size'] != self.image_size:
+            raise ValueError('Input image_size differs from fitted normalization')
+        self.color_mode = norm['color_mode']
+        if self.color_mode not in MODES:
+            raise ValueError('Unknown color mode in normalization file')
+        self.mean,self.std = norm['mean'],norm['std']
         self.samples = pd.read_csv(self.root / 'sample_index.csv', low_memory=False)
+        if _split_sha256(self.samples) != expected_sha:
+            raise ValueError('Prepared sample_index.csv differs from its frozen split fingerprint')
         self.samples = self.samples.loc[
             self.samples.animal.eq(animal) & self.samples.partition.eq(partition)].reset_index(drop=True)
         if self.samples.empty:
@@ -315,11 +399,13 @@ class TVSDDataset(Dataset):
         if load_responses:
             for session in sorted(self.samples.session.unique()):
                 with np.load(self.root / 'sessions' / f'{session}.npz', allow_pickle=False) as data:
+                    if not np.array_equal(data['response_window_ms'], info['response_window_ms']):
+                        raise ValueError(f'{session}: prepared response window disagrees with dataset_info')
                     counts = data['counts']
                     observed = data['observed']
-                    indices = data['readout_indices'].astype(np.int64)
-                if len(set(indices)) != len(indices) or np.any(indices < 0) or np.any(indices >= self.n_readouts):
-                    raise ValueError(f'Invalid local readout indices for {session}')
+                    indices = data['neuron_indices'].astype(np.int64)
+                if len(set(indices)) != len(indices) or np.any(indices < 0) or np.any(indices >= self.n_neurons):
+                    raise ValueError(f'Invalid local tracked neuron indices for {session}')
                 if counts.shape != observed.shape or counts.shape[1] != len(indices):
                     raise ValueError(f'Malformed responses for {session}')
                 self._session_data[session] = dict(counts=counts, observed=observed, indices=indices)
@@ -331,13 +417,11 @@ class TVSDDataset(Dataset):
     def __getitem__(self, i):
         row = self.samples.iloc[int(i)]
         path = _safe_image(self.image_root, row.image_relative_path)
-        with Image.open(path) as im:
-            im = im.convert('RGB')
-            im = im.resize((self.image_size, self.image_size), resample=Image.Resampling.BICUBIC)
-            pixels = np.array(im, dtype=np.uint8, copy=True)
-        image = torch.from_numpy(pixels).permute(2,0,1).float().div_(255.0)
-        responses = torch.zeros(self.n_readouts, dtype=torch.float32)
-        response_mask = torch.zeros(self.n_readouts, dtype=torch.bool)
+        image = torch.from_numpy(image_chw_normalized(
+            path, image_size=self.image_size, mode=self.color_mode,
+            mean=self.mean, std=self.std))
+        responses = torch.zeros(self.n_neurons, dtype=torch.float32)
+        response_mask = torch.zeros(self.n_neurons, dtype=torch.bool)
         if self.load_responses:
             data = self._session_data[row.session]
             j = int(row.trial_index)
@@ -357,17 +441,18 @@ def check_dataset(*, animal: str, partition: str, prepared_root: Path,
     batch = next(iter(DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)))
     x, y, mask = batch['image'], batch['responses'], batch['response_mask']
     if (x.shape != (len(y),3,image_size,image_size) or
-        y.shape != mask.shape or y.shape[1] != ds.n_readouts):
+        y.shape != mask.shape or y.shape[1] != ds.n_neurons):
         raise AssertionError('Unexpected batch shape')
     if mask.dtype != torch.bool or not torch.isfinite(x).all() or not torch.isfinite(y).all():
         raise AssertionError('Invalid pixel/response data')
-    if (y[~mask] != 0).any() or x.min() < 0 or x.max() > 1 or not mask.any():
-        raise AssertionError('Invalid unobserved values, pixel range or empty mask')
-    print(f'PASS {animal}/{partition}: {len(ds):,} presentations, {ds.n_readouts} readouts')
+    if (y[~mask] != 0).any() or not mask.any():
+        raise AssertionError('Invalid unobserved values or empty mask')
+    print(f'PASS {animal}/{partition}: {len(ds):,} presentations, {ds.n_neurons} tracked neurons')
     print('Image batch:', tuple(x.shape), 'range', (round(float(x.min()),4), round(float(x.max()),4)))
     print('Responses:', tuple(y.shape), 'mask:', tuple(mask.shape))
     print('Observed fraction in batch:', round(float(mask.float().mean()),4))
-    print('Mean observed spike count [40,160) ms:', round(float(y[mask].mean()),4))
+    window = json.loads((Path(prepared_root) / 'dataset_info.json').read_text())['response_window_ms']
+    print(f'Mean observed spike count [{window[0]:g},{window[1]:g}) ms:', round(float(y[mask].mean()),4))
     print('First stimulus:', batch['stimulus_id'][0], 'session:', batch['session'][0])
 
 
@@ -376,15 +461,16 @@ def main():
     cmd = p.add_subparsers(dest='cmd', required=True)
     prep = cmd.add_parser('prepare', help='Build the compact response packs and global presentation index')
     prep.add_argument('--processed-root', type=Path, default=ROOT)
-    prep.add_argument('--map-dir', type=Path, default=MAP_DIR)
     prep.add_argument('--images-root', type=Path, default=IMAGE_ROOT)
     prep.add_argument('--output-dir', type=Path, default=DEFAULT_PREPARED)
     prep.add_argument('--val-fraction', type=float, default=0.1)
     prep.add_argument('--seed', type=int, default=8000)
-    prep.add_argument('--expected-sessions', type=int, default=45)
+    prep.add_argument('--expected-sessions', type=int, default=EXPECTED_SESSIONS)
     prep.add_argument('--overwrite', action='store_true')
     prep.add_argument('--skip-image-file-check', action='store_true')
-    check = cmd.add_parser('check', help='Decode a batch and verify mask/readout layout')
+    prep.add_argument('--selection-dir', type=Path,
+                      help='Directory from select_tracks.py, defaults to root/identity_diagnostics/joint/selection')
+    check = cmd.add_parser('check', help='Decode a batch and verify mask/unit layout')
     check.add_argument('--animal', choices=['F','N'], default='F')
     check.add_argument('--partition', choices=['train','val','test'], default='train')
     check.add_argument('--prepared-root', type=Path, default=DEFAULT_PREPARED)
@@ -393,11 +479,11 @@ def main():
     check.add_argument('--batch-size', type=int, default=8)
     args = p.parse_args()
     if args.cmd == 'prepare':
-        prepare_dataset(processed_root=args.processed_root,map_dir=args.map_dir,
+        prepare_dataset(processed_root=args.processed_root,
                         image_root=args.images_root,output_dir=args.output_dir,
                         val_fraction=args.val_fraction,seed=args.seed,
                         expected_sessions=args.expected_sessions,overwrite=args.overwrite,
-                        check_images=not args.skip_image_file_check)
+                        check_images=not args.skip_image_file_check, selection_dir=args.selection_dir)
     else:
         check_dataset(animal=args.animal,partition=args.partition,
                       prepared_root=args.prepared_root,image_root=args.images_root,

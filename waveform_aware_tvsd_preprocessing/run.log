@@ -1,0 +1,341 @@
+=== 1/7 EXTRACT KS4 ===
+macaqueF_TVSD_20240112_B1: 1657 images × 287 units; 287 valid waveforms; 87.8% nonzero among observed; 100.0% observed; 11,724,328 spikes
+macaqueF_TVSD_20240112_B2: 1217 images × 308 units; 308 valid waveforms; 88.6% nonzero among observed; 100.0% observed; 10,741,125 spikes
+macaqueF_TVSD_20240112_B3: 1464 images × 295 units; 295 valid waveforms; 88.9% nonzero among observed; 100.0% observed; 12,417,921 spikes
+macaqueF_TVSD_20240112_B4: 741 images × 332 units; 332 valid waveforms; 89.0% nonzero among observed; 100.0% observed; 9,465,026 spikes
+macaqueF_TVSD_20240115_B1: 1418 images × 305 units; 305 valid waveforms; 90.7% nonzero among observed; 100.0% observed; 13,809,481 spikes
+macaqueF_TVSD_20240115_B2: 1378 images × 321 units; 321 valid waveforms; 88.5% nonzero among observed; 100.0% observed; 13,358,832 spikes
+macaqueF_TVSD_20240115_B3: 1504 images × 316 units; 316 valid waveforms; 88.3% nonzero among observed; 100.0% observed; 12,779,392 spikes
+macaqueF_TVSD_20240115_B4: 1235 images × 310 units; 310 valid waveforms; 90.3% nonzero among observed; 100.0% observed; 11,699,338 spikes
+macaqueF_TVSD_20240115_B5: 1478 images × 312 units; 312 valid waveforms; 91.3% nonzero among observed; 100.0% observed; 16,355,756 spikes
+macaqueF_TVSD_20240116_B1: 1459 images × 316 units; 316 valid waveforms; 88.2% nonzero among observed; 100.0% observed; 13,416,874 spikes
+macaqueF_TVSD_20240116_B2: 1554 images × 323 units; 323 valid waveforms; 85.7% nonzero among observed; 100.0% observed; 12,649,199 spikes
+macaqueF_TVSD_20240116_B3: 1769 images × 330 units; 330 valid waveforms; 85.9% nonzero among observed; 100.0% observed; 13,222,417 spikes
+macaqueF_TVSD_20240116_B4: 1450 images × 318 units; 318 valid waveforms; 87.6% nonzero among observed; 100.0% observed; 11,913,813 spikes
+macaqueF_TVSD_20240116_B5: 934 images × 335 units; 335 valid waveforms; 87.4% nonzero among observed; 100.0% observed; 10,097,486 spikes
+macaqueF_TVSD_20240118_B1: 2108 images × 294 units; 294 valid waveforms; 89.4% nonzero among observed; 100.0% observed; 15,351,798 spikes
+macaqueF_TVSD_20240118_B2: 2285 images × 299 units; 299 valid waveforms; 88.2% nonzero among observed; 100.0% observed; 17,214,425 spikes
+macaqueF_TVSD_20240118_B3: 1597 images × 301 units; 301 valid waveforms; 89.1% nonzero among observed; 100.0% observed; 13,197,275 spikes
+macaqueN_TVSD_20220111_B1: 1354 images × 202 units; 202 valid waveforms; 89.0% nonzero among observed; 100.0% observed; 6,789,200 spikes
+macaqueN_TVSD_20220111_B10: 288 images × 199 units; 199 valid waveforms; 90.6% nonzero among observed; 100.0% observed; 2,640,250 spikes
+macaqueN_TVSD_20220111_B2: 1307 images × 194 units; 194 valid waveforms; 88.8% nonzero among observed; 100.0% observed; 6,136,240 spikes
+macaqueN_TVSD_20220111_B3: 722 images × 185 units; 185 valid waveforms; 88.2% nonzero among observed; 100.0% observed; 3,862,707 spikes
+macaqueN_TVSD_20220111_B4: 876 images × 203 units; 203 valid waveforms; 88.4% nonzero among observed; 100.0% observed; 5,690,500 spikes
+macaqueN_TVSD_20220111_B5: 1370 images × 192 units; 192 valid waveforms; 88.3% nonzero among observed; 100.0% observed; 6,905,430 spikes
+macaqueN_TVSD_20220111_B6: 1176 images × 198 units; 198 valid waveforms; 87.2% nonzero among observed; 100.0% observed; 6,084,676 spikes
+macaqueN_TVSD_20220111_B7: 1074 images × 197 units; 197 valid waveforms; 89.5% nonzero among observed; 100.0% observed; 5,829,892 spikes
+macaqueN_TVSD_20220111_B8: 1366 images × 200 units; 200 valid waveforms; 87.8% nonzero among observed; 100.0% observed; 8,072,282 spikes
+macaqueN_TVSD_20220111_B9: 878 images × 219 units; 219 valid waveforms; 91.2% nonzero among observed; 100.0% observed; 8,935,852 spikes
+macaqueN_TVSD_20220112_B1: 1002 images × 216 units; 216 valid waveforms; 89.7% nonzero among observed; 100.0% observed; 6,931,650 spikes
+macaqueN_TVSD_20220112_B10: 270 images × 230 units; 230 valid waveforms; 89.9% nonzero among observed; 100.0% observed; 5,113,539 spikes
+macaqueN_TVSD_20220112_B11: 150 images × 221 units; 221 valid waveforms; 91.0% nonzero among observed; 100.0% observed; 3,309,700 spikes
+macaqueN_TVSD_20220112_B2: 559 images × 206 units; 206 valid waveforms; 88.3% nonzero among observed; 100.0% observed; 3,991,898 spikes
+macaqueN_TVSD_20220112_B3: 1161 images × 199 units; 199 valid waveforms; 88.6% nonzero among observed; 100.0% observed; 7,274,175 spikes
+macaqueN_TVSD_20220112_B4: 374 images × 192 units; 192 valid waveforms; 90.4% nonzero among observed; 100.0% observed; 3,332,916 spikes
+macaqueN_TVSD_20220112_B5: 395 images × 189 units; 189 valid waveforms; 89.2% nonzero among observed; 100.0% observed; 2,857,009 spikes
+macaqueN_TVSD_20220112_B6: 541 images × 199 units; 199 valid waveforms; 89.5% nonzero among observed; 100.0% observed; 4,306,743 spikes
+macaqueN_TVSD_20220112_B7: 743 images × 212 units; 212 valid waveforms; 89.2% nonzero among observed; 100.0% observed; 7,104,854 spikes
+macaqueN_TVSD_20220112_B8: 596 images × 217 units; 217 valid waveforms; 89.1% nonzero among observed; 100.0% observed; 4,756,648 spikes
+macaqueN_TVSD_20220112_B9: 854 images × 209 units; 209 valid waveforms; 89.8% nonzero among observed; 100.0% observed; 8,001,619 spikes
+macaqueN_TVSD_20220113_B1: 1530 images × 195 units; 195 valid waveforms; 89.3% nonzero among observed; 100.0% observed; 8,211,713 spikes
+macaqueN_TVSD_20220113_B2: 1150 images × 210 units; 210 valid waveforms; 88.2% nonzero among observed; 100.0% observed; 7,057,459 spikes
+macaqueN_TVSD_20220113_B3: 1030 images × 204 units; 204 valid waveforms; 89.1% nonzero among observed; 100.0% observed; 6,279,118 spikes
+macaqueN_TVSD_20220113_B4: 1503 images × 209 units; 209 valid waveforms; 88.5% nonzero among observed; 100.0% observed; 9,571,725 spikes
+macaqueN_TVSD_20220114_B1: 1323 images × 210 units; 210 valid waveforms; 89.0% nonzero among observed; 100.0% observed; 7,281,058 spikes
+macaqueN_TVSD_20220114_B2: 1002 images × 211 units; 211 valid waveforms; 90.1% nonzero among observed; 100.0% observed; 7,164,722 spikes
+macaqueN_TVSD_20220114_B3: 654 images × 192 units; 192 valid waveforms; 88.0% nonzero among observed; 100.0% observed; 2,968,236 spikes
+
+Inventory: 45/45 sessions, 11,012 KS4 unit instances
+Saved: /project/data/processed/jorge_v1/unit_instances.csv; no longitudinal identities assigned
+=== 2/7 AUDIT IMAGES ===
+Trial CSVs: 45
+Image presentations: 50,496
+Unique (split, image_index) identities:
+       n_images  n_presentations  min_index  max_index
+split                                                 
+test        100             6000          1        100
+train     22248            44496          1      22248
+Conflicting THINGS paths/categories per image ID: 0
+THINGS paths reused for multiple IDs: 0
+Unique IDs missing THINGS_image_path: 0
+
+Example rows:
+stimulus_id  n_presentations           THINGS_image_path                                                           NIN_local_path
+     test:1               60 alligator/alligator_14n.jpg  /vs03/VS03-VandC-3/THINGS/Passive_Fixation/_stims/THINGS_test/00001.bmp
+     test:2               60         altar/altar_13s.jpg  /vs03/VS03-VandC-3/THINGS/Passive_Fixation/_stims/THINGS_test/00002.bmp
+     test:3               60     ashtray/ashtray_14n.jpg  /vs03/VS03-VandC-3/THINGS/Passive_Fixation/_stims/THINGS_test/00003.bmp
+     test:4               60             axe/axe_14n.jpg  /vs03/VS03-VandC-3/THINGS/Passive_Fixation/_stims/THINGS_test/00004.bmp
+    train:1                2   aardvark/aardvark_01b.jpg /vs03/VS03-VandC-3/THINGS/Passive_Fixation/_stims/THINGS_train/00001.bmp
+    train:2                2   aardvark/aardvark_02s.jpg /vs03/VS03-VandC-3/THINGS/Passive_Fixation/_stims/THINGS_train/00002.bmp
+    train:3                2   aardvark/aardvark_03s.jpg /vs03/VS03-VandC-3/THINGS/Passive_Fixation/_stims/THINGS_train/00003.bmp
+    train:4                2   aardvark/aardvark_04s.jpg /vs03/VS03-VandC-3/THINGS/Passive_Fixation/_stims/THINGS_train/00004.bmp
+
+Indexing local image files under /project/data/assets/THINGS ...
+Local image files: 26,107
+
+Image resolution:
+resolution_status
+resolved    22348
+Image root: /project/data/assets/THINGS
+Original image shapes: all resolved files are square.
+All stimulus IDs resolved. Ready for a separate pixel/transform QA.
+
+Saved reports under: /project/data/processed/jorge_v1/images
+No recording files, images or neuronal identities were modified.
+=== 3/7 TRACK NEURONS ===
+Features: 1/45 macaqueF_TVSD_20240112_B1
+Features: 2/45 macaqueF_TVSD_20240112_B2
+Features: 3/45 macaqueF_TVSD_20240112_B3
+Features: 4/45 macaqueF_TVSD_20240112_B4
+Features: 5/45 macaqueF_TVSD_20240115_B1
+Features: 6/45 macaqueF_TVSD_20240115_B2
+Features: 7/45 macaqueF_TVSD_20240115_B3
+Features: 8/45 macaqueF_TVSD_20240115_B4
+Features: 9/45 macaqueF_TVSD_20240115_B5
+Features: 10/45 macaqueF_TVSD_20240116_B1
+Features: 11/45 macaqueF_TVSD_20240116_B2
+Features: 12/45 macaqueF_TVSD_20240116_B3
+Features: 13/45 macaqueF_TVSD_20240116_B4
+Features: 14/45 macaqueF_TVSD_20240116_B5
+Features: 15/45 macaqueF_TVSD_20240118_B1
+Features: 16/45 macaqueF_TVSD_20240118_B2
+Features: 17/45 macaqueF_TVSD_20240118_B3
+Features: 18/45 macaqueN_TVSD_20220111_B1
+Features: 19/45 macaqueN_TVSD_20220111_B2
+Features: 20/45 macaqueN_TVSD_20220111_B3
+Features: 21/45 macaqueN_TVSD_20220111_B4
+Features: 22/45 macaqueN_TVSD_20220111_B5
+Features: 23/45 macaqueN_TVSD_20220111_B6
+Features: 24/45 macaqueN_TVSD_20220111_B7
+Features: 25/45 macaqueN_TVSD_20220111_B8
+Features: 26/45 macaqueN_TVSD_20220111_B9
+Features: 27/45 macaqueN_TVSD_20220111_B10
+Features: 28/45 macaqueN_TVSD_20220112_B1
+Features: 29/45 macaqueN_TVSD_20220112_B2
+Features: 30/45 macaqueN_TVSD_20220112_B3
+Features: 31/45 macaqueN_TVSD_20220112_B4
+Features: 32/45 macaqueN_TVSD_20220112_B5
+Features: 33/45 macaqueN_TVSD_20220112_B6
+Features: 34/45 macaqueN_TVSD_20220112_B7
+Features: 35/45 macaqueN_TVSD_20220112_B8
+Features: 36/45 macaqueN_TVSD_20220112_B9
+Features: 37/45 macaqueN_TVSD_20220112_B10
+Features: 38/45 macaqueN_TVSD_20220112_B11
+Features: 39/45 macaqueN_TVSD_20220113_B1
+Features: 40/45 macaqueN_TVSD_20220113_B2
+Features: 41/45 macaqueN_TVSD_20220113_B3
+Features: 42/45 macaqueN_TVSD_20220113_B4
+Features: 43/45 macaqueN_TVSD_20220114_B1
+Features: 44/45 macaqueN_TVSD_20220114_B2
+Features: 45/45 macaqueN_TVSD_20220114_B3
+Computing joint day-first identity proposals (read only)...
+
+=== Rate weight 1 ===
+rate_weight                            1.00
+waveform_weight                        1.60
+isi_weight                             1.00
+amplitude_weight                       0.35
+min_score                              1.30
+min_margin                             0.50
+n_unit_instances                   11012.00
+n_sites                              705.00
+lower_bound                         1097.00
+n_daily_tracks                      3661.00
+n_global_tracks                     2291.00
+tracks_spanning_multiple_days        722.00
+unit_instances_in_repeat_tracks    10047.00
+tracks_with_rate_ratio_over_3         42.00
+tracks_flagged_for_review            163.00
+n_ambiguous_pair_proposals           337.00
+
+=== Rate weight 2 ===
+rate_weight                            2.00
+waveform_weight                        1.60
+isi_weight                             1.00
+amplitude_weight                       0.35
+min_score                              1.30
+min_margin                             0.50
+n_unit_instances                   11012.00
+n_sites                              705.00
+lower_bound                         1097.00
+n_daily_tracks                      3745.00
+n_global_tracks                     2411.00
+tracks_spanning_multiple_days        717.00
+unit_instances_in_repeat_tracks     9977.00
+tracks_with_rate_ratio_over_3          9.00
+tracks_flagged_for_review            117.00
+n_ambiguous_pair_proposals           316.00
+
+=== Rate weight 3 ===
+rate_weight                            3.00
+waveform_weight                        1.60
+isi_weight                             1.00
+amplitude_weight                       0.35
+min_score                              1.30
+min_margin                             0.50
+n_unit_instances                   11012.00
+n_sites                              705.00
+lower_bound                         1097.00
+n_daily_tracks                      3893.00
+n_global_tracks                     2592.00
+tracks_spanning_multiple_days        711.00
+unit_instances_in_repeat_tracks     9822.00
+tracks_with_rate_ratio_over_3          1.00
+tracks_flagged_for_review             83.00
+n_ambiguous_pair_proposals           326.00
+
+Known-distinct simultaneous units passing the waveform/FR gates (conditional sample):
+count    243.000000
+mean      -0.710133
+std        1.771881
+min       -5.668861
+50%       -0.728231
+90%        1.540130
+95%        2.234915
+99%        3.286997
+max        3.444942
+14.0% also pass raw joint-score threshold (they are NEVER eligible for real matches; not an error-rate estimate)
+
+Saved diagnostics to /project/data/processed/jorge_v1/identity_diagnostics/joint
+No longitudinal neuron IDs assigned.
+=== 4/7 SELECT TRACKS (MERGE) ===
+{
+  "n_original_units": 11012,
+  "n_proposed_tracks": 2411,
+  "n_selected_neurons": 878,
+  "n_selected_unit_instances": 7790,
+  "n_unselected_unit_instances": 3222,
+  "min_recordings": 3,
+  "min_train": 2000,
+  "min_pairwise_r": 0.93,
+  "max_rate_ratio": 3.0,
+  "max_distinct_r": 0.98,
+  "reappearance": "merge",
+  "keep_all_tracks": false,
+  "site_audit_applied": false,
+  "source_membership_sha256": "a6e4e4bef7e5efe80836b9fb2e223a20c8f67c2dd6460acf0330e6b8cb5a24c9",
+  "source_quality_sha256": "edd68400b754bae124eae45f2c4d77acf49a9363f520cfec2a7261c7d954b4e3",
+  "matching_config_sha256": "a9ea10bfa2356d8d9e4424e6457b2c074816c462333ef7b56ca59b7b040706b8"
+}
+=== 5/7 BUILD DATASET ===
+ 1/45 macaqueF_TVSD_20240112_B1: 1657 presentations, 185 tracked neuron observations
+ 2/45 macaqueF_TVSD_20240112_B2: 1217 presentations, 207 tracked neuron observations
+ 3/45 macaqueF_TVSD_20240112_B3: 1464 presentations, 202 tracked neuron observations
+ 4/45 macaqueF_TVSD_20240112_B4: 741 presentations, 193 tracked neuron observations
+ 5/45 macaqueF_TVSD_20240115_B1: 1418 presentations, 189 tracked neuron observations
+ 6/45 macaqueF_TVSD_20240115_B2: 1378 presentations, 210 tracked neuron observations
+ 7/45 macaqueF_TVSD_20240115_B3: 1504 presentations, 213 tracked neuron observations
+ 8/45 macaqueF_TVSD_20240115_B4: 1235 presentations, 210 tracked neuron observations
+ 9/45 macaqueF_TVSD_20240115_B5: 1478 presentations, 187 tracked neuron observations
+10/45 macaqueF_TVSD_20240116_B1: 1459 presentations, 194 tracked neuron observations
+11/45 macaqueF_TVSD_20240116_B2: 1554 presentations, 184 tracked neuron observations
+12/45 macaqueF_TVSD_20240116_B3: 1769 presentations, 203 tracked neuron observations
+13/45 macaqueF_TVSD_20240116_B4: 1450 presentations, 193 tracked neuron observations
+14/45 macaqueF_TVSD_20240116_B5: 934 presentations, 185 tracked neuron observations
+15/45 macaqueF_TVSD_20240118_B1: 2108 presentations, 171 tracked neuron observations
+16/45 macaqueF_TVSD_20240118_B2: 2285 presentations, 182 tracked neuron observations
+17/45 macaqueF_TVSD_20240118_B3: 1597 presentations, 195 tracked neuron observations
+18/45 macaqueN_TVSD_20220111_B1: 1354 presentations, 167 tracked neuron observations
+19/45 macaqueN_TVSD_20220111_B10: 288 presentations, 163 tracked neuron observations
+20/45 macaqueN_TVSD_20220111_B2: 1307 presentations, 159 tracked neuron observations
+21/45 macaqueN_TVSD_20220111_B3: 722 presentations, 151 tracked neuron observations
+22/45 macaqueN_TVSD_20220111_B4: 876 presentations, 169 tracked neuron observations
+23/45 macaqueN_TVSD_20220111_B5: 1370 presentations, 149 tracked neuron observations
+24/45 macaqueN_TVSD_20220111_B6: 1176 presentations, 157 tracked neuron observations
+25/45 macaqueN_TVSD_20220111_B7: 1074 presentations, 152 tracked neuron observations
+26/45 macaqueN_TVSD_20220111_B8: 1366 presentations, 157 tracked neuron observations
+27/45 macaqueN_TVSD_20220111_B9: 878 presentations, 174 tracked neuron observations
+28/45 macaqueN_TVSD_20220112_B1: 1002 presentations, 163 tracked neuron observations
+29/45 macaqueN_TVSD_20220112_B10: 270 presentations, 161 tracked neuron observations
+30/45 macaqueN_TVSD_20220112_B11: 150 presentations, 154 tracked neuron observations
+31/45 macaqueN_TVSD_20220112_B2: 559 presentations, 165 tracked neuron observations
+32/45 macaqueN_TVSD_20220112_B3: 1161 presentations, 161 tracked neuron observations
+33/45 macaqueN_TVSD_20220112_B4: 374 presentations, 154 tracked neuron observations
+34/45 macaqueN_TVSD_20220112_B5: 395 presentations, 157 tracked neuron observations
+35/45 macaqueN_TVSD_20220112_B6: 541 presentations, 163 tracked neuron observations
+36/45 macaqueN_TVSD_20220112_B7: 743 presentations, 164 tracked neuron observations
+37/45 macaqueN_TVSD_20220112_B8: 596 presentations, 162 tracked neuron observations
+38/45 macaqueN_TVSD_20220112_B9: 854 presentations, 163 tracked neuron observations
+39/45 macaqueN_TVSD_20220113_B1: 1530 presentations, 147 tracked neuron observations
+40/45 macaqueN_TVSD_20220113_B2: 1150 presentations, 166 tracked neuron observations
+41/45 macaqueN_TVSD_20220113_B3: 1030 presentations, 161 tracked neuron observations
+42/45 macaqueN_TVSD_20220113_B4: 1503 presentations, 166 tracked neuron observations
+43/45 macaqueN_TVSD_20220114_B1: 1323 presentations, 164 tracked neuron observations
+44/45 macaqueN_TVSD_20220114_B2: 1002 presentations, 165 tracked neuron observations
+45/45 macaqueN_TVSD_20220114_B3: 654 presentations, 153 tracked neuron observations
+
+Dataset built: /project/data/processed/jorge_v1/model_dataset
+Selected tracked neurons by animal: {'F': 548, 'N': 330} Unit instances: 7790
+Nominal/observed train response entries: 7863777 7863777
+Partition images: {'train': 20023, 'val': 2225, 'test': 100}
+Partition presentations: {'train': 40046, 'test': 6000, 'val': 4450}
+No KS4 recordings or provisional identities modified.
+=== 6/7 MATLAB GRAYSCALE NORMALIZATION ===
+Normalization: 2000 / 20023
+Normalization: 4000 / 20023
+Normalization: 6000 / 20023
+Normalization: 8000 / 20023
+Normalization: 10000 / 20023
+Normalization: 12000 / 20023
+Normalization: 14000 / 20023
+Normalization: 16000 / 20023
+Normalization: 18000 / 20023
+Normalization: 20000 / 20023
+Saved /project/data/processed/jorge_v1/model_dataset/normalization.json mean [0.5018757044970424] std [0.2522673812851588]
+=== 7/7 VALIDATE ===
+PASS F/train: 20,023 presentations, 548 tracked neurons
+Image batch: (8, 3, 224, 224) range (-1.9784, 1.9742)
+Responses: (8, 548) mask: (8, 548)
+Observed fraction in batch: 0.3376
+Mean observed spike count [40,160) ms: 6.1297
+First stimulus: train:16504 session: macaqueF_TVSD_20240112_B1
+PASS F/val: 2,225 presentations, 548 tracked neurons
+Image batch: (8, 3, 224, 224) range (-1.9895, 1.9742)
+Responses: (8, 548) mask: (8, 548)
+Observed fraction in batch: 0.3376
+Mean observed spike count [40,160) ms: 6.477
+First stimulus: train:13742 session: macaqueF_TVSD_20240112_B1
+PASS F/test: 3,000 presentations, 548 tracked neurons
+Image batch: (8, 3, 224, 224) range (-1.9895, 1.9706)
+Responses: (8, 548) mask: (8, 548)
+Observed fraction in batch: 0.3376
+Mean observed spike count [40,160) ms: 5.6399
+First stimulus: test:27 session: macaqueF_TVSD_20240112_B1
+PASS N/train: 20,023 presentations, 330 tracked neurons
+Image batch: (8, 3, 224, 224) range (-1.9784, 1.9742)
+Responses: (8, 330) mask: (8, 330)
+Observed fraction in batch: 0.5061
+Mean observed spike count [40,160) ms: 6.1272
+First stimulus: train:16504 session: macaqueN_TVSD_20220111_B1
+PASS N/val: 2,225 presentations, 330 tracked neurons
+Image batch: (8, 3, 224, 224) range (-1.9895, 1.9742)
+Responses: (8, 330) mask: (8, 330)
+Observed fraction in batch: 0.5061
+Mean observed spike count [40,160) ms: 6.5075
+First stimulus: train:13742 session: macaqueN_TVSD_20220111_B1
+PASS N/test: 3,000 presentations, 330 tracked neurons
+Image batch: (8, 3, 224, 224) range (-1.9895, 1.9706)
+Responses: (8, 330) mask: (8, 330)
+Observed fraction in batch: 0.5061
+Mean observed spike count [40,160) ms: 5.3226
+First stimulus: test:27 session: macaqueN_TVSD_20220111_B1
+=== EXTRA: FIRST-ONLY SELECTION ===
+{
+  "n_original_units": 11012,
+  "n_proposed_tracks": 2411,
+  "n_selected_neurons": 894,
+  "n_selected_unit_instances": 894,
+  "n_unselected_unit_instances": 10118,
+  "min_recordings": 3,
+  "min_train": 0,
+  "min_pairwise_r": 0.93,
+  "max_rate_ratio": 3.0,
+  "max_distinct_r": 0.98,
+  "reappearance": "first-only",
+  "keep_all_tracks": false,
+  "site_audit_applied": false,
+  "source_membership_sha256": "a6e4e4bef7e5efe80836b9fb2e223a20c8f67c2dd6460acf0330e6b8cb5a24c9",
+  "source_quality_sha256": "edd68400b754bae124eae45f2c4d77acf49a9363f520cfec2a7261c7d954b4e3",
+  "matching_config_sha256": "a9ea10bfa2356d8d9e4424e6457b2c074816c462333ef7b56ca59b7b040706b8"
+}
+=== ALL DONE ===

@@ -1,34 +1,31 @@
 #!/usr/bin/env python3
-"""Export strict-V1 filtered KS4 NIX units, raw spikes and stimulus response counts.
+"""Export filtered KS4 NIX units and stimulus responses, without external cell labels.
 
 No waveform classification is calculated. No cross-session neuronal identity is inferred.
-Katka's previously exported labels are preserved independently and attached only
-by exact (session, array, nix_name) equality.
+No cell-type classifications, annotations, or externally derived identities are used.
 
 Reads original TVSD trial metadata and all selected NIX files directly. One session
 at a time; outputs compressed ragged spike times plus a trials x units count matrix.
 
 Run in the TVSD Docker container:
-    python scripts/build_ks4_v1.py --session macaqueF_TVSD_20240112_B1
-    python scripts/build_ks4_v1.py --all
+    python scripts/extract_ks4.py --session macaqueF_TVSD_20240112_B1
+    python scripts/extract_ks4.py --all
 
-Requires numpy, pandas, h5py. Never reads Katka's huge pickles.
+Requires numpy, pandas, h5py; no external classification tables.
 """
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
 
 import h5py
 import numpy as np
 import pandas as pd
+from constants import DEFAULT_RESPONSE_WINDOW_MS
 
 DEFAULT_MANIFEST = Path('/project/data/reports/tvsd_manifest.csv')
-DEFAULT_LABEL_DIR = Path('/project/data/reports/katka_labels')
-DEFAULT_OUT = Path('/project/data/processed/ks4_v1')
+DEFAULT_OUT = Path('/project/data/processed/tvsd_waveform_aware_v1')
 WAVEFORM_SAMPLES = 90
-LABEL_PATTERN = re.compile(r'monkey([FN])_all_arrays_date_(\d{8}_B\d+)_v1_labels\.csv$')
 
 
 def as_string(value):
@@ -59,7 +56,7 @@ def waveform(properties, name):
     return arr
 
 
-def read_nix_units(nix_path, array_id):
+def read_nix_units(nix_path, array_id, area):
     """Yield the complete spike train plus metadata for each NIX unit."""
     with h5py.File(nix_path, 'r') as f:
         blocks = [(n, g) for n, g in f['metadata'].items() if n.startswith('neo.block.')]
@@ -88,9 +85,9 @@ def read_nix_units(nix_path, array_id):
             electrode = prop(p, 'Electrode_ID')
             if electrode is None:
                 raise ValueError(f'{nix_path}, {uid}: missing Electrode_ID')
-            area = as_string(prop(p, 'Area', 'V1'))
-            if area != 'V1':
-                raise ValueError(f'{nix_path}, {uid}: expected Area V1, found {area}')
+            recorded_area = as_string(prop(p, 'Area', area))
+            if recorded_area != area:
+                raise ValueError(f'{nix_path}, {uid}: expected Area {area}, found {recorded_area}')
             annotated_array = prop(p, 'Array_ID')
             if annotated_array is not None and int(annotated_array) != int(array_id):
                 raise ValueError(f'{nix_path}, {uid}: Array_ID does not match manifest')
@@ -151,35 +148,6 @@ def read_trials(recording_dir, session, window_ms):
     return trials
 
 
-def load_katka_labels(label_dir):
-    """Preserve all recovered original labels, including ones absent from KS4."""
-    frames = []
-    for path in sorted(label_dir.glob('*_v1_labels.csv')):
-        match = LABEL_PATTERN.fullmatch(path.name)
-        if not match:
-            raise ValueError(f'Unexpected Katka CSV filename: {path.name}')
-        monkey, recording = match.groups()
-        session = f'macaque{monkey}_TVSD_{recording}'
-        df = pd.read_csv(path)
-        required = {'cell_name', 'array', 'area', 'final_class'}
-        if missing := required - set(df.columns):
-            raise ValueError(f'{path}: missing {sorted(missing)}')
-        if not df['area'].eq('V1').all():
-            raise ValueError(f'{path}: contains non-V1 rows')
-        df = df.copy()
-        df['session'] = session
-        df['animal'] = monkey
-        df['katka_source_csv'] = path.name
-        frames.append(df)
-    if not frames:
-        return pd.DataFrame(columns=['session', 'array', 'cell_name', 'final_class',
-                                     'animal', 'katka_source_csv'])
-    reference = pd.concat(frames, ignore_index=True)
-    if reference.duplicated(['session', 'array', 'cell_name']).any():
-        raise ValueError('Duplicate session/array/UUID in original Katka reference')
-    return reference
-
-
 def atomically_save_npz(path, **arrays):
     tmp = path.with_suffix('.npz.tmp')
     try:
@@ -190,7 +158,7 @@ def atomically_save_npz(path, **arrays):
         tmp.unlink(missing_ok=True)
 
 
-def process_session(session, rows, output, window_ms):
+def process_session(session, rows, output, window_ms, area):
     source_path = Path(rows.iloc[0]['source_path'])
     recording_dir = source_path.parent.parent
     trials = read_trials(recording_dir, session, window_ms)
@@ -203,7 +171,7 @@ def process_session(session, rows, output, window_ms):
         if not Path(row.source_path).is_file():
             raise FileNotFoundError(row.source_path)
         count_array = 0
-        for unit in read_nix_units(row.source_path, row.array):
+        for unit in read_nix_units(row.source_path, row.array, area):
             uid = unit['nix_name']
             key = f'{session}/A{int(row.array)}/{uid}'
             spikes = unit['spike_times']
@@ -280,7 +248,7 @@ def process_session(session, rows, output, window_ms):
           f'{len(all_times):,} spikes', flush=True)
 
 
-def rebuild_inventory(manifest, output, reference, window_ms):
+def rebuild_inventory(manifest, output, window_ms):
     sessions = sorted(manifest['session'].unique())
     present = []
     for s in sessions:
@@ -306,26 +274,13 @@ def rebuild_inventory(manifest, output, reference, window_ms):
     if len(units) != expected:
         raise ValueError(f'Processed {len(units)} units, expected {expected} from manifest')
 
-    reference.to_csv(output / 'katka_reference_units.csv', index=False)
-    if len(reference):
-        right = reference[['session', 'array', 'cell_name', 'final_class',
-                           'katka_source_csv']].rename(columns={'cell_name': 'nix_name'})
-        units = units.merge(right, on=['session', 'array', 'nix_name'],
-                            how='left', validate='one_to_one')
-    else:
-        units['final_class'] = pd.NA
-        units['katka_source_csv'] = pd.NA
-    units['has_katka_label'] = units['final_class'].notna()
-    # No cross-session identities should be inferred at this step.
+    # Recording-specific unit IDs, never inferred identities.
     units['longitudinal_neuron_id'] = pd.NA
 
     done = units['session'].nunique()
     filename = 'unit_instances.csv' if done == len(sessions) else 'unit_instances_partial.csv'
     units.to_csv(output / filename, index=False)
-    print(f'\nInventory: {done}/{len(sessions)} sessions, {len(units):,} KS4 unit instances; '
-          f'{units.has_katka_label.sum():,} exact Katka labels')
-    print(f'Original Katka reference: {len(reference):,} rows from '
-          f'{reference.session.nunique() if len(reference) else 0} session exports')
+    print(f'\nInventory: {done}/{len(sessions)} sessions, {len(units):,} KS4 unit instances')
     print(f'Saved: {output / filename}; no longitudinal identities assigned')
 
 
@@ -335,9 +290,9 @@ def main():
     mode.add_argument('--session', help='Process one session first')
     mode.add_argument('--all', action='store_true', help='Process/resume all sessions')
     parser.add_argument('--manifest', type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument('--labels-dir', type=Path, default=DEFAULT_LABEL_DIR)
+    parser.add_argument('--area', choices=['V1', 'V2', 'V4', 'IT'], default='V1')
     parser.add_argument('--output-root', type=Path, default=DEFAULT_OUT)
-    parser.add_argument('--window-ms', nargs=2, type=float, default=[40, 160],
+    parser.add_argument('--window-ms', nargs=2, type=float, default=DEFAULT_RESPONSE_WINDOW_MS,
                         metavar=('START', 'STOP'))
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
@@ -350,14 +305,13 @@ def main():
     mandatory = {'session', 'array', 'area', 'units', 'source_path'}
     if missing := mandatory - set(manifest.columns):
         raise ValueError(f'Manifest missing {sorted(missing)}')
-    manifest = manifest.loc[manifest['area'].eq('V1')].sort_values(['session', 'array'])
+    manifest = manifest.loc[manifest['area'].eq(args.area)].sort_values(['session', 'array'])
     if manifest.empty or manifest.duplicated(['session', 'array']).any():
-        raise ValueError('Manifest has no V1 recordings or duplicate arrays')
+        raise ValueError(f'Manifest has no {args.area} recordings or duplicate arrays')
     all_sessions = sorted(manifest['session'].unique())
     requested = [args.session] if args.session else all_sessions
     if set(requested) - set(all_sessions):
-        raise ValueError(f'Session not found in strict-V1 manifest: {requested}')
-    reference = load_katka_labels(args.labels_dir)
+        raise ValueError(f'Session not found in {args.area} manifest: {requested}')
     args.output_root.mkdir(parents=True, exist_ok=True)
 
     for session in requested:
@@ -370,8 +324,8 @@ def main():
             print(f'SKIP completed: {session}', flush=True)
             continue
         group = manifest[manifest['session'].eq(session)]
-        process_session(session, group, args.output_root, window_ms)
-    rebuild_inventory(manifest, args.output_root, reference, window_ms)
+        process_session(session, group, args.output_root, window_ms, args.area)
+    rebuild_inventory(manifest, args.output_root, window_ms)
 
 
 if __name__ == '__main__':
