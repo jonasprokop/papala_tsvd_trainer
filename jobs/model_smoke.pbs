@@ -1,0 +1,41 @@
+#!/bin/bash
+#PBS -N tvsd_model_smoke
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1:gpu_mem=16gb:gpu_cap=compute_75:scratch_local=10gb
+#PBS -l walltime=02:00:00
+
+set -euo pipefail
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+CODE="$ROOT/code/papala_tsvd_trainer"
+SIF="$ROOT/containers/sinz-base.sif"
+PYTHON=/mnt/tvsd/envs/tvsd-py39/bin/python
+: "${PBS_JOBID:?Run through PBS, not on the login node}"
+
+for path in "$CODE/scripts/model_smoke.py" "$CODE/configs/tvsd_default.yaml" \
+            "$SIF" "$ROOT/data/tvsd_waveform_aware_v1/model_dataset/dataset_info.json" \
+            "$ROOT/data/assets/THINGS"; do
+  [ -e "$path" ] || { echo "Missing required path: $path" >&2; exit 2; }
+done
+mkdir -p "$ROOT/logs" "$ROOT/results/model_smoke" "$ROOT/cache/huggingface" "$ROOT/cache/torch"
+exec > "$ROOT/logs/model_smoke.${PBS_JOBID}.log" 2>&1
+printf 'START %s | host=%s | job=%s\n' "$(date -Is)" "$(hostname)" "$PBS_JOBID"
+
+# Tested Singularity bind layout from the earlier MetaCentrum GPU smoke.
+export SINGULARITYENV_PYTHONPATH=/project
+export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
+export SINGULARITYENV_HF_HUB_CACHE=/mnt/tvsd/cache/huggingface/hub
+export SINGULARITYENV_TORCH_HOME=/mnt/tvsd/cache/torch
+export SINGULARITYENV_PYTHONUNBUFFERED=1
+export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+singularity exec --nv \
+  --bind "$CODE:/project" \
+  --bind "$ROOT:/mnt/tvsd" \
+  "$SIF" "$PYTHON" /project/scripts/model_smoke.py \
+    --config /project/configs/tvsd_default.yaml \
+    --output "/mnt/tvsd/results/model_smoke/${PBS_JOBID}" \
+    --data-root /mnt/tvsd/data/tvsd_waveform_aware_v1/model_dataset \
+    --image-root /mnt/tvsd/data/assets/THINGS \
+    --dataset-module /project/waveform_aware_tvsd_preprocessing/scripts/dataset.py \
+    --train-batches 2
+
+printf 'JOB SUCCESSFUL %s\n' "$(date -Is)"
