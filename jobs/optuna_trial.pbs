@@ -5,39 +5,61 @@
 
 set -euo pipefail
 ROOT=/storage/brno2/home/jonas_prokop/visual_models
-CODE="$ROOT/code/papala_tsvd_trainer"
+CODE="$ROOT/code/papala_tvsd_trainer"
 SIF="$ROOT/containers/sinz-base.sif"
-PYTHON="/mnt/tvsd/envs/tvsd-py39/bin/python"
-
-: "${OPTUNA_EXPERIMENT:?Set via qsub -v}"
-: "${OPTUNA_BATCH:?Set via qsub -v}"
-: "${PBS_ARRAY_INDEX:?This script requires a PBS array}"
-
-mkdir -p "$ROOT/logs" "$ROOT/cache/huggingface" "$ROOT/cache/torch"
-exec > "$ROOT/logs/optuna.${PBS_ARRAY_ID}.${PBS_ARRAY_INDEX}.log" 2>&1
-printf 'START: %s | host=%s | job=%s | index=%s\n' "$(date -Is)" "$(hostname)" "$PBS_JOBID" "$PBS_ARRAY_INDEX"
-
-# /project is the code checkout, not the data root; all dataset and run paths
-# in the frozen trial config point to persistent /storage/brno2/...
-export SINGULARITYENV_PYTHONPATH=/project
-export SINGULARITYENV_HF_HOME="/mnt/tvsd/cache/huggingface"
-export SINGULARITYENV_HF_HUB_CACHE="/mnt/tvsd/cache/huggingface/hub"
-export SINGULARITYENV_TORCH_HOME="/mnt/tvsd/cache/torch"
-export SINGULARITYENV_PYTHONUNBUFFERED=1
-export SINGULARITYENV_V1_CUDNN_BENCHMARK=0
-export SINGULARITYENV_V1_CUDNN_DETERMINISTIC=0
-export SINGULARITYENV_V1_MATMUL_TF32=0
-export SINGULARITYENV_V1_CUDNN_TF32=1
+PYTHON=/mnt/tvsd/envs/tvsd-py39/bin/python
+: "${OPTUNA_EXPERIMENT:?qsub -v OPTUNA_EXPERIMENT=...}"
+: "${OPTUNA_BATCH:?qsub -v OPTUNA_BATCH=...}"
+: "${PBS_ARRAY_INDEX:?requires PBS array}"
+: "${SCRATCHDIR:?requires scratch_local}"
 
 case "$OPTUNA_EXPERIMENT" in
   "$ROOT"/*) REL="${OPTUNA_EXPERIMENT#"$ROOT"/}" ;;
-  *) echo "Experiment must be under $ROOT" >&2; exit 2 ;;
+  *) echo 'Experiment must reside under Brno2 visual_models' >&2; exit 2 ;;
 esac
+mkdir -p "$ROOT/logs" "$ROOT/cache/huggingface" "$ROOT/cache/torch"
+exec > "$ROOT/logs/optuna.${PBS_ARRAY_ID}.${PBS_ARRAY_INDEX}.log" 2>&1
+printf 'START: %s host=%s job=%s index=%s\n' "$(date -Is)" "$(hostname)" "$PBS_JOBID" "$PBS_ARRAY_INDEX"
 
+# Use manifest index rather than assuming Optuna trial number == PBS array index.
+TRIAL_DIR=$(python3 - <<'PY'
+import json,os,pathlib
+root=pathlib.Path(os.environ['OPTUNA_EXPERIMENT'])
+batch=os.environ['OPTUNA_BATCH']
+idx=int(os.environ['PBS_ARRAY_INDEX'])
+m=json.loads((root/'batches'/batch/'manifest.json').read_text())
+match=[r for r in m['records'] if int(r['index'])==idx]
+assert len(match)==1,match
+print(match[0]['trial_dir'])
+PY
+)
+SEED="$TRIAL_DIR/worker_seed.sqlite"
+[ -f "$SEED" ] || { echo "Missing worker seed: $SEED" >&2; exit 3; }
+cp "$SEED" "$SCRATCHDIR/worker.sqlite"
+
+export SINGULARITYENV_PYTHONPATH=/project
+export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
+export SINGULARITYENV_HF_HUB_CACHE=/mnt/tvsd/cache/huggingface/hub
+export SINGULARITYENV_TORCH_HOME=/mnt/tvsd/cache/torch
+export SINGULARITYENV_PYTHONUNBUFFERED=1
+export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+set +e
 singularity exec --nv \
   --bind "$CODE:/project" \
   --bind "$ROOT:/mnt/tvsd" \
+  --bind "$ROOT:$ROOT" \
+  --bind "$SCRATCHDIR:/worker" \
   "$SIF" "$PYTHON" -m sinz_model.optuna_worker \
-  --experiment "/mnt/tvsd/$REL" --batch "$OPTUNA_BATCH" \
-  --index "$PBS_ARRAY_INDEX"
-echo "JOB SUCCESSFUL: $(date -Is)"
+    --experiment "/mnt/tvsd/$REL" --batch "$OPTUNA_BATCH" \
+    --index "$PBS_ARRAY_INDEX" --worker-db /worker/worker.sqlite
+rc=$?
+set -e
+# Active SQLite was LOCAL to this node. After Python exits all handles are closed,
+# and we persist only this worker's completed/partial DB for the collector.
+if [ -f "$SCRATCHDIR/worker.sqlite" ]; then
+  cp "$SCRATCHDIR/worker.sqlite" "$TRIAL_DIR/worker_result.sqlite.pending.$PBS_JOBID"
+  mv "$TRIAL_DIR/worker_result.sqlite.pending.$PBS_JOBID" "$TRIAL_DIR/worker_result.sqlite"
+fi
+printf 'FINISH: %s exit=%s\n' "$(date -Is)" "$rc"
+exit "$rc"

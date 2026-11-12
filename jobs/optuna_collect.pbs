@@ -1,0 +1,26 @@
+#!/bin/bash
+#PBS -N tvsd_collect
+#PBS -l select=1:ncpus=2:mem=8gb:scratch_local=5gb
+#PBS -l walltime=00:30:00
+
+set -euo pipefail
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+CODE="$ROOT/code/papala_tvsd_trainer"
+SIF="$ROOT/containers/sinz-base.sif"
+PYTHON=/mnt/tvsd/envs/tvsd-py39/bin/python
+: "${OPTUNA_EXPERIMENT:?missing OPTUNA_EXPERIMENT}"
+: "${OPTUNA_BATCH:?missing OPTUNA_BATCH}"
+case "$OPTUNA_EXPERIMENT" in
+  "$ROOT"/*) REL="${OPTUNA_EXPERIMENT#"$ROOT"/}" ;;
+  *) echo 'Experiment outside Brno2 root' >&2; exit 2 ;;
+esac
+mkdir -p "$ROOT/logs"
+exec > "$ROOT/logs/optuna_collect.${PBS_JOBID}.log" 2>&1
+printf 'COLLECT START: %s host=%s\n' "$(date -Is)" "$(hostname)"
+export SINGULARITYENV_PYTHONPATH=/project
+export SINGULARITYENV_TMPDIR=/worker
+singularity exec --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
+  --bind "$ROOT:$ROOT" --bind "$SCRATCHDIR:/worker" \
+  "$SIF" "$PYTHON" -m sinz_model.optuna_batch collect \
+    --root "/mnt/tvsd/$REL" --fail-missing
+printf 'COLLECT DONE: %s\n' "$(date -Is)"

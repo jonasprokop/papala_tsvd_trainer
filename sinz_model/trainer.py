@@ -1,7 +1,7 @@
 from __future__ import annotations
 import math, shlex, sys, time, shutil
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -159,9 +159,14 @@ def _header(run_id,candidate_id,member,cfg,tr,va,te,device,resume):
     print(f"PHASE 2   {cfg['training']['readout_only_epochs']+1}-{cfg['training']['total_epochs']} | core+readout | lr={cfg['training']['phase2_lr']}")
     print("RESUME   ","yes" if resume else "no"); print("="*88)
 
+class TrainingPruned(Exception):
+    """Training stopped deliberately by an external epoch callback."""
+
+
 def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=None,notes=None,
                  resume_run_id:Optional[str]=None,dry_run=False,limit_train_batches=None,
-                 limit_val_batches=None,evaluate_test=True)->str:
+                 limit_val_batches=None,evaluate_test=True,
+                 on_epoch_end:Optional[Callable[[int,float],bool]]=None)->str:
     member_index=int(member_index); seed=int(cfg["training"]["member_seeds"][member_index])
     seeds=seed_everything(seed,cfg); dc=cfg["data"]
     is_tvsd = dc.get("kind") == "tvsd"
@@ -371,6 +376,10 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
             outer.set_postfix(val_r=f"{vs['mean']:.4f}",best="--" if best_epoch is None else f"{best:.4f}@{best_epoch+1}",
                               lr=f"{new_lr:.1e}",decays=lr_decays,
                               epoch_t=format_seconds(sec),ETA=format_seconds(eta))
+            # The checkpoint and registry epoch are durable before the callback.
+            # Manual training passes no callback and behaves exactly as before.
+            if on_epoch_end is not None and on_epoch_end(epoch, float(vs["mean"])):
+                raise TrainingPruned(f"Pruned after epoch {epoch + 1}")
             if stop_after_decay:
                 print(f"EARLY STOP  learning-rate decay limit exceeded ({lr_decays})")
                 break
@@ -396,6 +405,8 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
         reg.log_artifact(run_id,"per_neuron_metrics",str(edir/"per_neuron.csv"))
         torch.save(capture_rng_state(),run_dir/"rng_end.pt"); reg.finish_run(run_id,"completed")
         reg.export_results(cfg["project"]["result_sheet_path"]); return run_id
+    except TrainingPruned as exc:
+        reg.finish_run(run_id,"pruned",str(exc)); raise
     except KeyboardInterrupt:
         reg.finish_run(run_id,"interrupted","partial epoch discarded; resume from latest completed epoch")
         print("\nInterrupted: partial epoch discarded. Resume from latest.pt."); raise

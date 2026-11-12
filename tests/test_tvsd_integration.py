@@ -1,3 +1,4 @@
+"""Exercise the CURRENT frozen TVSD v3 dataset contract, not obsolete v1 scripts."""
 import json
 from pathlib import Path
 from unittest.mock import patch
