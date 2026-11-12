@@ -1,0 +1,43 @@
+#!/bin/bash
+#PBS -N tvsd_optuna
+#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_mem=16gb:gpu_cap=compute_75:scratch_local=10gb
+#PBS -l walltime=12:00:00
+
+set -euo pipefail
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+CODE="$ROOT/code/papala_tsvd_trainer"
+SIF="$ROOT/containers/sinz-base.sif"
+PYTHON="/mnt/tvsd/envs/tvsd-py39/bin/python"
+
+: "${OPTUNA_EXPERIMENT:?Set via qsub -v}"
+: "${OPTUNA_BATCH:?Set via qsub -v}"
+: "${PBS_ARRAY_INDEX:?This script requires a PBS array}"
+
+mkdir -p "$ROOT/logs" "$ROOT/cache/huggingface" "$ROOT/cache/torch"
+exec > "$ROOT/logs/optuna.${PBS_ARRAY_ID}.${PBS_ARRAY_INDEX}.log" 2>&1
+printf 'START: %s | host=%s | job=%s | index=%s\n' "$(date -Is)" "$(hostname)" "$PBS_JOBID" "$PBS_ARRAY_INDEX"
+
+# /project is the code checkout, not the data root; all dataset and run paths
+# in the frozen trial config point to persistent /storage/brno2/...
+export SINGULARITYENV_PYTHONPATH=/project
+export SINGULARITYENV_HF_HOME="/mnt/tvsd/cache/huggingface"
+export SINGULARITYENV_HF_HUB_CACHE="/mnt/tvsd/cache/huggingface/hub"
+export SINGULARITYENV_TORCH_HOME="/mnt/tvsd/cache/torch"
+export SINGULARITYENV_PYTHONUNBUFFERED=1
+export SINGULARITYENV_V1_CUDNN_BENCHMARK=0
+export SINGULARITYENV_V1_CUDNN_DETERMINISTIC=0
+export SINGULARITYENV_V1_MATMUL_TF32=0
+export SINGULARITYENV_V1_CUDNN_TF32=1
+
+case "$OPTUNA_EXPERIMENT" in
+  "$ROOT"/*) REL="${OPTUNA_EXPERIMENT#"$ROOT"/}" ;;
+  *) echo "Experiment must be under $ROOT" >&2; exit 2 ;;
+esac
+
+singularity exec --nv \
+  --bind "$CODE:/project" \
+  --bind "$ROOT:/mnt/tvsd" \
+  "$SIF" "$PYTHON" -m sinz_model.optuna_worker \
+  --experiment "/mnt/tvsd/$REL" --batch "$OPTUNA_BATCH" \
+  --index "$PBS_ARRAY_INDEX"
+echo "JOB SUCCESSFUL: $(date -Is)"

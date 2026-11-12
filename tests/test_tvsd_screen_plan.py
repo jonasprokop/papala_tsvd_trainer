@@ -22,13 +22,13 @@ class TVSDScreenPlanTests(unittest.TestCase):
             key=next(iter(p['overrides']))
             _validate_existing_path(self.cfg,key)
             modified=_apply_overrides(self.cfg,p['overrides'])
-            self.assertEqual(modified['model']['readout']['outdims'],733)
+            self.assertEqual(modified['model']['readout']['outdims'],1173)
             self.assertEqual(modified['training']['total_epochs'],200)
             self.assertEqual(modified['data']['kind'],'tvsd')
 
     def test_normalization_paths_and_random_search_remain_available(self):
-        self.assertEqual(self.cfg['data']['dataset_module_path'],'/project/scripts/tvsd_dataset.py')
-        self.assertEqual(self.cfg['data']['preprocessing']['normalization_path'],'/project/configs/tvsd_normalization.json')
+        self.assertEqual(self.cfg['data']['dataset_module_path'],'/project/waveform_aware_tvsd_preprocessing/scripts/dataset.py')
+        self.assertEqual(self.cfg['data']['preprocessing']['normalization_path'],'/project/data/processed/tvsd_waveform_aware_v1/model_dataset/normalization.json')
         original=_load_space(str(ROOT/'configs/tvsd_search_space.yaml'))
         self.assertIn('training.loss.gamma_readout', original)
         self.assertIn('model.readout.init_sigma', original)

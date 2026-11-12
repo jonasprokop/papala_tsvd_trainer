@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -22,9 +23,16 @@ def _module_from_path(filename):
     filename = Path(filename)
     if not filename.is_file():
         raise FileNotFoundError('TVSD dataset source not found: %s' % filename)
+    # The frozen preprocessing source imports neighboring image_transform and
+    # constants modules by name; they are not installed as a Python package.
     spec = importlib.util.spec_from_file_location('tvsd_dataset_frozen_v1', filename)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    parent = str(filename.resolve().parent)
+    sys.path.insert(0, parent)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -44,8 +52,10 @@ class TVSDTable:
             with np.load(Path(prepared_root) / 'sessions' / (session+'.npz'), allow_pickle=False) as data:
                 counts = data['counts']
                 observed = data['observed']
-                indices = data['readout_indices'].astype('int64')
+                indices = data['neuron_indices'].astype('int64')
                 source_rows = data['source_rows'].astype('int64')
+            if counts.shape != observed.shape or counts.shape[1] != len(indices):
+                raise ValueError('Malformed prepared session response arrays: %s' % session)
             animal = str(self.rows.iloc[int(row_ids[0])].animal)
             if not ((self.rows.iloc[row_ids].animal == animal).all()):
                 raise ValueError('Mixed animals in session %s' % session)
@@ -78,28 +88,27 @@ class TVSDTable:
 
 
 class TVSDOriginalInterface(Dataset):
-    """TVSDDataset -> Cadena batch keys; padded per-animal neuron masks."""
-    def __init__(self, tvsd_ds, animal, widths, mean, std):
+    """Map validated TVSDDataset samples to Cadena's combined F|N neuron axis.
+
+    Images from the frozen preprocessing loader are ALREADY grayscale,
+    z-scored with train-only statistics, and replicated across 3 channels.
+    Never normalize or convert them a second time.
+    """
+    def __init__(self, tvsd_ds, animal, widths):
         self.inner = tvsd_ds
         self.animal = animal
         self.widths = widths
-        self.mean = float(mean)
-        self.std = float(std)
         self.n_readouts = widths['F'] + widths['N']
         self.repeat_index = tvsd_ds.samples.groupby('stimulus_id').cumcount().to_numpy(dtype='int64')
-        if not (0 < self.std < 1.0):
-            raise ValueError('Invalid grayscale normalization std')
 
     def __len__(self):
         return len(self.inner)
 
     def __getitem__(self, i):
         sample = self.inner[i]
-        rgb = sample['image']
-        if tuple(rgb.shape[:1]) != (3,):
-            raise ValueError('RGB channel count mismatch')
-        gray = 0.2989*rgb[0] + 0.5870*rgb[1] + 0.1140*rgb[2]
-        image = ((gray - self.mean) / self.std).unsqueeze(0).repeat(3,1,1)
+        image = sample['image']
+        if image.ndim != 3 or image.shape[0] != 3:
+            raise ValueError('Prepared image must have 3 channels')
         target = torch.zeros(self.n_readouts, dtype=torch.float32)
         mask = torch.zeros(self.n_readouts, dtype=torch.bool)
         offset = 0 if self.animal == 'F' else self.widths['F']
@@ -118,7 +127,7 @@ class TVSDTrainingBundle:
         dc = cfg['data']
         self.root = Path(dc['root'])
         self.info = json.loads((self.root/'dataset_info.json').read_text())
-        self.widths = {a:int(self.info['n_readouts'][a]) for a in ('F','N')}
+        self.widths = {a:int(self.info['n_neurons'][a]) for a in ('F','N')}
         if self.widths != {a:int(cfg['model']['readout']['outdims_by_animal'][a]) for a in ('F','N')}:
             raise ValueError('Frozen dataset and model readout counts disagree')
         self.df = pd.read_csv(self.root/'sample_index.csv', low_memory=False)
@@ -133,18 +142,29 @@ class TVSDTrainingBundle:
             raise ValueError('Stimulus leaks between partitions')
         if self.df.loc[self.df.partition.eq('test'),'stimulus_id'].nunique() != int(self.info['partition_images']['test']):
             raise ValueError('Frozen test identity mismatch')
-        if int(self.info['n_selected_unit_instances']) != len(pd.read_csv(self.root/'unit_to_readout.csv')):
+        if int(self.info['n_selected_unit_instances']) != len(pd.read_csv(self.root/'unit_to_neuron.csv')):
             raise ValueError('Unit mapping differs from frozen dataset')
+        # Load exactly the calibration consumed by the frozen preprocessing loader.
         norm_path = Path(dc['preprocessing']['normalization_path'])
+        if norm_path.resolve() != (self.root/'normalization.json').resolve():
+            raise ValueError('Normalization must be the frozen dataset normalization.json')
         self.normalization_stats = json.loads(norm_path.read_text())
-        if self.normalization_stats.get('input_hw') != dc['preprocessing']['expected_output_hw']:
+        norm = self.normalization_stats
+        if norm.get('image_size') != dc['preprocessing']['expected_output_hw'][0] or (
+                dc['preprocessing']['expected_output_hw'][0] != dc['preprocessing']['expected_output_hw'][1]):
             raise ValueError('Normalization was measured for another image resolution')
-        if self.normalization_stats.get('preprocessing') != 'rgb_resize_bicubic_then_luma':
-            raise ValueError('Wrong image normalization recipe')
-        self.mean = float(self.normalization_stats['mean'])
-        self.std = float(self.normalization_stats['std'])
-        if not (0 <= self.mean <= 1 and 0 < self.std < 1):
-            raise ValueError('Invalid normalization statistics')
+        if norm.get('method') != 'global_pixel_zscore_train_unique_images' or norm.get('partial'):
+            raise ValueError('Expected complete train-only normalization')
+        if norm.get('color_mode') != 'gray-bt601':
+            raise ValueError('Expected MATLAB/BT.601 grayscale normalization')
+        if norm.get('split_sha256') != self.info.get('split_sha256'):
+            raise ValueError('Normalization and frozen split fingerprints disagree')
+        mean = np.asarray(norm['mean'], dtype=float)
+        std = np.asarray(norm['std'], dtype=float)
+        if (mean.shape != (1,) or std.shape != (1,) or
+                not np.isfinite(mean).all() or not np.isfinite(std).all() or
+                not (0 <= mean[0] <= 1 and 0 < std[0] < 1)):
+            raise ValueError('Invalid single-channel grayscale normalization statistics')
         if int(self.info['split_seed']) != int(dc['split']['seed']):
             raise ValueError('TVSD split seed changed')
         # Use prepared train/validation partition, never redraw it.
@@ -178,5 +198,5 @@ class TVSDTrainingBundle:
         for animal in ('F','N'):
             inner=self.source.TVSDDataset(animal=animal,partition=partition,
                     prepared_root=self.root,image_root=Path(cfg['image_root']),image_size=int(hw[0]))
-            datasets.append(TVSDOriginalInterface(inner,animal,self.widths,self.mean,self.std))
+            datasets.append(TVSDOriginalInterface(inner,animal,self.widths))
         return ConcatDataset(datasets)

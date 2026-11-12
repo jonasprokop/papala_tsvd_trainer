@@ -5,14 +5,14 @@ project:
   result_sheet_path: /project/tvsd_search/runs.csv
 data:
   kind: tvsd
-  root: /project/data/processed/ks4_v1/model_dataset_v1
-  dataset_module_path: /project/scripts/tvsd_dataset.py
+  root: /project/data/processed/tvsd_waveform_aware_v1/model_dataset
+  dataset_module_path: /project/waveform_aware_tvsd_preprocessing/scripts/dataset.py
   image_root: /project/data/assets/THINGS
   preprocessing:
     expected_output_hw:
     - 224
     - 224
-    normalization_path: /project/configs/tvsd_normalization.json
+    normalization_path: /project/data/processed/tvsd_waveform_aware_v1/model_dataset/normalization.json
     colorspace: grayscale-replicated
   loader:
     batch_size: 64
@@ -33,7 +33,7 @@ model:
     - 28
     batchnorm_momentum: 0.9
   readout:
-    outdims: 733
+    outdims: 1173
     init_mu_range: 0.4
     init_sigma: 0.6
     gauss_type: isotropic
@@ -41,8 +41,8 @@ model:
     align_corners: true
     bias: true
     outdims_by_animal:
-      F: 451
-      N: 282
+      F: 804
+      N: 369
   output:
     elu_offset: -1.0
 training:

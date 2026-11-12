@@ -1,0 +1,3 @@
+# Coordinator only. GPU workers do not import Optuna.
+optuna==4.8.0
+PyYAML>=6.0,<7

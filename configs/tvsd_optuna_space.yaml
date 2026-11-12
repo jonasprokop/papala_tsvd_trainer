@@ -1,0 +1,24 @@
+# Only parameters already used by the existing model/trainer.
+# Fixed seed, fixed train/val split, fixed epoch budget across trials.
+search:
+  training.phase1_lr:
+    type: loguniform
+    low: 0.002
+    high: 0.01
+  training.phase2_lr:
+    type: loguniform
+    low: 0.0001
+    high: 0.001
+  training.optimizer.weight_decay:
+    type: choice
+    values: [0.0, 0.0001, 0.001, 0.01]
+  training.loss.gamma_readout:
+    type: loguniform
+    low: 0.3
+    high: 100.0
+  training.scheduler.patience:
+    type: choice
+    values: [3, 5, 8]
+  model.readout.init_sigma:
+    type: choice
+    values: [0.2, 0.4, 0.6]
