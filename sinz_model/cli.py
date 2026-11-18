@@ -44,10 +44,14 @@ def command_init_db(args) -> None:
 def command_export_bundle(args) -> None:
     from .export_bundle import export_bundle
 
-    print(export_bundle(
-        str(Path(args.output_root).resolve() / "results.sqlite"),
-        args.candidate_id, args.destination,
-    ))
+    registry_path = str(Path(args.output_root).resolve() / "results.sqlite")
+    reg = RunRegistry(registry_path)
+    cfg = reg.get_candidate_config(args.candidate_id)
+    if cfg.get("model", {}).get("family", "sinz") == "transformer_neural":
+        from .transformer_bridge import export_transformer_bundle
+        print(export_transformer_bundle(cfg, registry_path, args.candidate_id, args.destination))
+    else:
+        print(export_bundle(registry_path, args.candidate_id, args.destination))
 
 
 def command_audit_data(args) -> None:
@@ -148,6 +152,12 @@ def command_eval(args) -> None:
     reg.initialize()
     run = reg.get_run(args.run_id)
     cfg = json.loads(run["config_json"])
+    if cfg.get("model", {}).get("family", "sinz") == "transformer_neural":
+        if args.checkpoint is not None:
+            raise ValueError("Transformer evaluation uses the registered best checkpoint")
+        from .transformer_bridge import evaluate_transformer_run
+        _json(evaluate_transformer_run(cfg, reg.sqlite_path, args.run_id))
+        return
     checkpoint = args.checkpoint or reg.best_checkpoint(args.run_id)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     metrics, collected = evaluate_checkpoint(cfg, checkpoint, device)
@@ -200,7 +210,16 @@ def command_candidates(args) -> None:
     reg = _registry(args.output_root)
     reg.initialize()
     cmd = args.candidates_command
-    if cmd == "list":
+    if cmd == "create":
+        cfg = load_config(args.config)
+        config_db = Path(cfg["project"]["sqlite_path"]).resolve()
+        if config_db != Path(reg.sqlite_path).resolve():
+            raise ValueError(f"Config SQLite path {config_db} differs from registry {reg.sqlite_path}")
+        workflow_id = (args.workflow_id if args.workflow_id else
+                       reg.create_workflow(args.workflow_name))
+        result = reg.create_candidate(workflow_id, args.stage, cfg, notes=args.notes)
+        _json({"workflow_id": workflow_id, **result})
+    elif cmd == "list":
         rows = reg.list_candidates(
             workflow_id=args.workflow_id,
             stage=args.stage,
@@ -479,6 +498,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("candidates")
     _add_output_root(p)
     csub = p.add_subparsers(dest="candidates_command", required=True)
+
+    q = csub.add_parser("create", help="register a config as a candidate in the project database")
+    q.add_argument("--config", required=True)
+    work = q.add_mutually_exclusive_group(required=True)
+    work.add_argument("--workflow-id")
+    work.add_argument("--workflow-name")
+    q.add_argument("--stage", default="search")
+    q.add_argument("--notes", default=None)
 
     q = csub.add_parser("list")
     q.add_argument("--workflow-id", default=None)

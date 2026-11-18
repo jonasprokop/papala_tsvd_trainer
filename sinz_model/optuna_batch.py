@@ -25,6 +25,9 @@ import yaml
 from optuna.trial import TrialState
 
 from .orchestrator import RunRegistry
+from .owner_lock import break_owner_lock, owner_lock
+from .registry_handoff import project_writer_lock
+from .sqlite_snapshot import atomic_snapshot, sqlite_snapshot
 
 OPTUNA_VERSION = optuna.__version__
 RESERVED = {'training.member_seeds', 'training.ensemble_members'}
@@ -137,21 +140,9 @@ def _sample(trial, specs):
     return params
 
 
-@contextmanager
 def _lock(root: Path):
-    """Coordinator jobs serialize through atomic directory creation (not flock/NFS)."""
-    root.mkdir(parents=True, exist_ok=True)
-    lock = root / '.coordinator.lock'
-    try:
-        lock.mkdir(mode=0o700)
-    except FileExistsError as exc:
-        raise RuntimeError(f'Coordinator lock exists: {lock}. Inspect before removing.') from exc
-    try:
-        (lock / 'owner').write_text(f'pid={os.getpid()}\n')
-        yield
-    finally:
-        (lock / 'owner').unlink(missing_ok=True)
-        lock.rmdir()
+    """Serialize one Optuna study's prepare/submit/collect operations."""
+    return owner_lock(root / '.coordinator.lock')
 
 
 def _experiment(root: Path):
@@ -168,18 +159,6 @@ def _db(meta):
     return Path(meta['project_db']).resolve()
 
 
-def _sqlite_snapshot(source: Path, target: Path):
-    """Consistent SQLite backup even if the source has a journal."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        raise FileExistsError(target)
-    if not source.exists():
-        raise FileNotFoundError(source)
-    with sqlite3.connect(f'file:{source}?mode=ro', uri=True) as s:
-        with sqlite3.connect(str(target)) as d:
-            s.backup(d)
-
-
 @contextmanager
 def _central(root: Path, meta: dict):
     """Run the sole coordinator on local scratch, publish atomically on success.
@@ -189,11 +168,12 @@ def _central(root: Path, meta: dict):
     """
     db = _db(meta)
     db.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='tvsd-coordinator-', dir=os.environ.get('TMPDIR') or None) as tmp:
+    with project_writer_lock(db), tempfile.TemporaryDirectory(
+            prefix='tvsd-coordinator-', dir=os.environ.get('TMPDIR') or None) as tmp:
         local = Path(tmp) / 'project.sqlite'
         fingerprint = ((db.stat().st_size, db.stat().st_mtime_ns) if db.exists() else None)
         if db.exists():
-            _sqlite_snapshot(db, local)
+            sqlite_snapshot(db, local)
         registry = RunRegistry(str(local))
         registry.initialize()
         with registry.connect() as con:
@@ -219,14 +199,7 @@ def _central(root: Path, meta: dict):
             current = ((db.stat().st_size, db.stat().st_mtime_ns) if db.exists() else None)
             if current != fingerprint:
                 raise RuntimeError('Central project database changed during coordination; refusing overwrite')
-            published = db.with_name(f'{db.name}.tmp.{os.getpid()}')
-            try:
-                with sqlite3.connect(str(local)) as source:
-                    with sqlite3.connect(str(published)) as dest:
-                        source.backup(dest)
-                os.replace(published, db)
-            finally:
-                published.unlink(missing_ok=True)
+            atomic_snapshot(local, db)
 
 
 def _workspace(root: Path):
@@ -258,15 +231,22 @@ def initialize(args):
             raise FileExistsError('Study already initialized')
         base = yaml.safe_load(Path(args.config).read_text())
         specs = _space(Path(args.space), base)
-        if args.epochs is not None:
-            base['training']['total_epochs'] = int(args.epochs)
-        if args.phase1_epochs is not None:
-            base['training']['readout_only_epochs'] = int(args.phase1_epochs)
-        if not 0 < int(base['training']['readout_only_epochs']) < int(base['training']['total_epochs']):
-            raise ValueError('Require >=1 readout-only and >=1 joint epoch')
+        strategy = base.get('training', {}).get('strategy', 'gradient')
+        if strategy == 'frozen_ridge':
+            if args.epochs is not None or args.phase1_epochs is not None:
+                raise ValueError('SGD epoch budgets do not apply to frozen_ridge')
+            if args.prune or args.train_batches is not None or args.val_batches is not None:
+                raise ValueError('frozen_ridge requires no epoch pruning or batch limits')
+        else:
+            if args.epochs is not None:
+                base['training']['total_epochs'] = int(args.epochs)
+            if args.phase1_epochs is not None:
+                base['training']['readout_only_epochs'] = int(args.phase1_epochs)
+            if not 0 < int(base['training']['readout_only_epochs']) < int(base['training']['total_epochs']):
+                raise ValueError('Require >=1 readout-only and >=1 joint epoch')
         base['training']['ensemble_members'] = 1
         base['training']['member_seeds'] = [int(args.member_seed)]
-        project_db = Path(args.project_db or workspace / 'results' / 'project.sqlite').resolve()
+        project_db = Path(args.project_db or workspace / 'results' / 'results.sqlite').resolve()
         if not project_db.is_relative_to(workspace):
             raise ValueError('Project DB must be inside the shared workspace')
         meta = {
@@ -340,7 +320,8 @@ def prepare(args):
                 cfg['data']['image_root'] = str(Path(args.image_root or workspace / 'data' / 'assets' / 'THINGS').resolve())
                 cfg['data']['preprocessing']['normalization_path'] = str(Path(cfg['data']['root']) / 'normalization.json')
                 cfg['data']['dataset_module_path'] = '/project/waveform_aware_tvsd_preprocessing/scripts/dataset.py'
-                cfg['training']['progress']['enabled'] = False
+                if isinstance(cfg['training'].get('progress'), dict):
+                    cfg['training']['progress']['enabled'] = False
                 trial.set_user_attr('batch', batch_name)
                 _write(trial_dir / 'config.json', cfg)
                 records.append({
@@ -357,7 +338,7 @@ def prepare(args):
         for record in records:
             snapshot = Path(record['trial_dir']) / 'worker_seed.sqlite'
             if not snapshot.exists():
-                _sqlite_snapshot(_db(meta), snapshot)
+                sqlite_snapshot(_db(meta), snapshot)
         print(f'Prepared {n} private read-only snapshots and configs in {batch}')
 
 
@@ -383,9 +364,11 @@ def submit(args):
         paths = Path(__file__).resolve().parents[1] / 'jobs'
         env = _pbs_env(root, manifest['batch'])
         array = ['qsub', '-J', f'1-{n}', f'%{cap}', '-v', env, str(paths / 'optuna_trial.pbs')]
-        if args.dry_run:
+        if args.dry_run or not getattr(args, 'execute', False):
             print('Array:', ' '.join(array))
-            print('Collector: qsub -W depend=afterany:<array-id> -v ' + env + ' ' + str(paths / 'optuna_collect.pbs'))
+            print('After the array ends, collect manually: python -m sinz_model.optuna_batch collect --root ' + str(root))
+            if not args.dry_run:
+                print('PREVIEW ONLY: add --execute to submit PBS jobs')
             return
         manifest['submission_pending'] = True
         _write(active, manifest)
@@ -399,6 +382,12 @@ def submit(args):
             raise RuntimeError('qsub array returned empty job ID; inspect qstat')
         manifest['array_job_id'] = array_id
         _write(active, manifest)
+        if not getattr(args, 'schedule_collector', False):
+            manifest['submission_pending'] = False
+            _write(active, manifest)
+            print(f'Scheduled only array {array_id} ({n} trials, cap {cap})')
+            print('When it finishes, collect manually: python -m sinz_model.optuna_batch collect --root ' + str(root))
+            return
         collector_cmd = ['qsub', '-W', f'depend=afterany:{array_id}', '-v', env,
                          str(paths / 'optuna_collect.pbs')]
         # A collection submission failure must NOT schedule the array twice.
@@ -576,6 +565,12 @@ def status(args):
                   'collector:', manifest['collector_job_id'])
 
 
+def break_study_lock(args):
+    """Opt-in recovery of a study lock left by a dead local process."""
+    lock = Path(args.root).resolve() / '.coordinator.lock'
+    print('REMOVED_STALE_LOCK=' + str(break_owner_lock(lock)))
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='command', required=True)
@@ -605,6 +600,10 @@ def parser():
     q.add_argument('--root', required=True)
     q.add_argument('--concurrency', type=int, default=4)
     q.add_argument('--dry-run', action='store_true')
+    q.add_argument('--execute', action='store_true',
+                   help='Required explicit opt-in to submit any PBS jobs')
+    q.add_argument('--schedule-collector', action='store_true',
+                   help='Opt in to an additional PBS collector job; manual collection is default')
     q.set_defaults(func=submit)
     q = sub.add_parser('collect')
     q.add_argument('--root', required=True)
@@ -613,6 +612,9 @@ def parser():
     q = sub.add_parser('status')
     q.add_argument('--root', required=True)
     q.set_defaults(func=status)
+    q = sub.add_parser('break-lock')
+    q.add_argument('--root', required=True)
+    q.set_defaults(func=break_study_lock)
     return p
 
 

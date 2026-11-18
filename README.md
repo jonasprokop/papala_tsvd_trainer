@@ -1,4 +1,30 @@
-# Waveform-aware TVSD preprocessing
+# TVSD trainer and waveform-aware preprocessing
+
+One repository for two neural encoding model families and their shared TVSD
+experiment registry:
+
+- `sinz_model/`: Sinz-style ConvNeXt model, training, evaluation and Optuna
+  ask/tell batching. Config: `configs/tvsd_default.yaml`.
+- `transformer_model/`: frozen ZWM features, grouped masked ridge and model
+  export. Config: `configs/tvsd_zwm_ridge.yaml`. See
+  [ZWM runtime and MetaCentrum instructions](transformer_model/README.md).
+- `waveform_aware_tvsd_preprocessing/`: source data preparation and neuron
+  tracking. Its [README](waveform_aware_tvsd_preprocessing/README.md) covers
+  the preprocessing pipeline.
+
+PBS submission is **opt-in**. Optuna `submit` previews commands unless
+`--execute` is supplied; standalone ZWM runs use `jobs/zwm_train.pbs`.
+Training workers never write the central SQLite file. Manual or explicitly
+scheduled collectors publish results under one coordinator lock after the jobs
+finish.
+
+Quick offline safety check (stdlib only):
+
+```bash
+python -m unittest discover -s tests -p test_lock_smoke.py -v
+```
+
+## Preprocessing handoff notes
 
 **Preprocessing and loading only.** This standalone package is distilled from the
 KS4 → THINGS pipeline. It adds **waveform classifications** to the extracted unit inventory,

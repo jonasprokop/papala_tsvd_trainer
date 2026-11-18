@@ -5,7 +5,7 @@
 
 set -euo pipefail
 ROOT=/storage/brno2/home/jonas_prokop/visual_models
-CODE="$ROOT/code/papala_tvsd_trainer"
+CODE="$ROOT/code/papala_tsvd_trainer"
 SIF="$ROOT/containers/sinz-base.sif"
 PYTHON=/mnt/tvsd/envs/tvsd-py39/bin/python
 : "${OPTUNA_EXPERIMENT:?qsub -v OPTUNA_EXPERIMENT=...}"
@@ -33,17 +33,94 @@ assert len(match)==1,match
 print(match[0]['trial_dir'])
 PY
 )
+# All families use the same immutable SIF. Only the Python prefix changes.
+FAMILY=$(python3 - "$TRIAL_DIR/config.json" <<'PYCONFIG'
+import json,sys
+cfg=json.load(open(sys.argv[1]))
+print(cfg.get('model',{}).get('family','sinz'))
+PYCONFIG
+)
+if [ "$FAMILY" = transformer_neural ]; then
+  PYTHON="$ROOT/envs/zwm-py310/bin/python"
+  [ -d "$ROOT/code/ZWM" ] || { echo 'Missing upstream ZWM checkout' >&2; exit 3; }
+elif [ "$FAMILY" != sinz ]; then
+  echo "Unsupported model family $FAMILY" >&2; exit 3
+fi
+[ -f "$SIF" ] && [ -f "$PYTHON" ] || { echo "Missing image or Python: $SIF $PYTHON" >&2; exit 3; }
+printf 'FAMILY=%s IMAGE=%s PYTHON=%s\n' "$FAMILY" "$SIF" "$PYTHON"
 SEED="$TRIAL_DIR/worker_seed.sqlite"
 [ -f "$SEED" ] || { echo "Missing worker seed: $SEED" >&2; exit 3; }
-cp "$SEED" "$SCRATCHDIR/worker.sqlite"
+# On retry recover the LAST worker snapshot, not the initial study seed;
+# otherwise the run/provenance and resumable ridge state are lost.
+SOURCE_DB="$SEED"
+if [ -f "$TRIAL_DIR/worker_result.sqlite" ]; then
+  SOURCE_DB="$TRIAL_DIR/worker_result.sqlite"
+fi
+cp "$SOURCE_DB" "$SCRATCHDIR/worker.sqlite"
+printf 'Worker SQLite source: %s\n' "$SOURCE_DB"
+# SIGKILL never executes Python finally; a dead PBS job can leave this lock.
+# Do not steal a lock from a live job merely because its ID differs.
+LOCK="$TRIAL_DIR/.worker-running"
+if [ -f "$LOCK" ]; then
+  OLD_JOB=$(sed -n 's/^job=\([^ ]*\).*/\1/p' "$LOCK")
+  [ -n "$OLD_JOB" ] && [ "$OLD_JOB" != manual ] && [ "$OLD_JOB" != "$PBS_JOBID" ] || {
+    echo "Ambiguous worker lock: $LOCK" >&2; exit 5;
+  }
+  set +e
+  # OpenPBS retains completed jobs in extended history (-x).
+  OLD_STATUS=$(qstat -x -f "$OLD_JOB" 2>&1)
+  old_rc=$?
+  set -e
+  if [ "$old_rc" -eq 0 ]; then
+    case "$OLD_STATUS" in
+      *"job_state = F"*|*"job_state = C"*|*"job_state = X"*) ;;
+      *) echo "Previous PBS job may still be active: $OLD_JOB" >&2; exit 5 ;;
+    esac
+  else
+    case "$OLD_STATUS" in
+      *"Unknown Job Id"*|*"Unknown Job ID"*) ;;
+      *) echo "Cannot verify old PBS job has exited: $OLD_STATUS" >&2; exit 5 ;;
+    esac
+  fi
+  [ "$(sed -n 's/^job=\([^ ]*\).*/\1/p' "$LOCK")" = "$OLD_JOB" ] || {
+    echo "Worker lock changed while checking it" >&2; exit 5;
+  }
+  rm -- "$LOCK"
+  printf 'Removed stale lock for completed PBS job %s\n' "$OLD_JOB"
+fi
 
-export SINGULARITYENV_PYTHONPATH=/project
+export SINGULARITYENV_PYTHONPATH="/project:$ROOT/code/ZWM"
+export SINGULARITYENV_PYTHONNOUSERSITE=1
 export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
 export SINGULARITYENV_HF_HUB_CACHE=/mnt/tvsd/cache/huggingface/hub
+export SINGULARITYENV_HF_HUB_OFFLINE=1
+export SINGULARITYENV_TRANSFORMERS_OFFLINE=1
 export SINGULARITYENV_TORCH_HOME=/mnt/tvsd/cache/torch
 export SINGULARITYENV_PYTHONUNBUFFERED=1
 export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
+export SINGULARITYENV_OPENBLAS_NUM_THREADS=4
+export SINGULARITYENV_MKL_NUM_THREADS=4
+export SINGULARITYENV_OMP_NUM_THREADS=4
 
+persist_worker() {
+  if [ -f "$SCRATCHDIR/worker.sqlite" ]; then
+    python3 "$CODE/sinz_model/sqlite_snapshot.py" \
+      --source "$SCRATCHDIR/worker.sqlite" \
+      --destination "$TRIAL_DIR/worker_result.sqlite"
+  fi
+}
+RUN_PID=""
+on_term() {
+  trap - TERM
+  echo 'PBS TERM: requesting worker shutdown and saving SQLite snapshot'
+  if [ -n "$RUN_PID" ]; then
+    kill -TERM "$RUN_PID" 2>/dev/null || true
+    wait "$RUN_PID" || true
+  fi
+  persist_worker || true
+  exit 143
+}
+trap on_term TERM
 set +e
 singularity exec --nv \
   --bind "$CODE:/project" \
@@ -52,14 +129,13 @@ singularity exec --nv \
   --bind "$SCRATCHDIR:/worker" \
   "$SIF" "$PYTHON" -m sinz_model.optuna_worker \
     --experiment "/mnt/tvsd/$REL" --batch "$OPTUNA_BATCH" \
-    --index "$PBS_ARRAY_INDEX" --worker-db /worker/worker.sqlite
+    --index "$PBS_ARRAY_INDEX" --worker-db /worker/worker.sqlite &
+RUN_PID=$!
+wait "$RUN_PID"
 rc=$?
 set -e
-# Active SQLite was LOCAL to this node. After Python exits all handles are closed,
-# and we persist only this worker's completed/partial DB for the collector.
-if [ -f "$SCRATCHDIR/worker.sqlite" ]; then
-  cp "$SCRATCHDIR/worker.sqlite" "$TRIAL_DIR/worker_result.sqlite.pending.$PBS_JOBID"
-  mv "$TRIAL_DIR/worker_result.sqlite.pending.$PBS_JOBID" "$TRIAL_DIR/worker_result.sqlite"
-fi
+trap - TERM
+# SQLite's backup API copies a consistent DB including any committed WAL pages.
+persist_worker
 printf 'FINISH: %s exit=%s\n' "$(date -Is)" "$rc"
 exit "$rc"

@@ -1,0 +1,55 @@
+# Single sinz-base.sif, with external Brno2 Python 3.9 and 3.10 prefixes.
+# Python 3.10 must be created and verified on MetaCentrum before use.
+project:
+  name: tvsd-zwm-170m-ridge
+  output_root: /mnt/tvsd/results
+  sqlite_path: /mnt/tvsd/results/results.sqlite
+  result_sheet_path: /mnt/tvsd/results/runs.csv
+  feature_cache_root: /mnt/tvsd/results/zwm_feature_cache
+runtime:
+  python_executable: /storage/brno2/home/jonas_prokop/visual_models/envs/zwm-py310/bin/python
+
+data:
+  kind: tvsd
+  root: /mnt/tvsd/data/tvsd_waveform_aware_v1/model_dataset
+  dataset_module_path: /project/waveform_aware_tvsd_preprocessing/scripts/dataset.py
+  image_root: /mnt/tvsd/data/assets/THINGS
+  preprocessing:
+    expected_output_hw: [224,224]
+    normalization_path: /mnt/tvsd/data/tvsd_waveform_aware_v1/model_dataset/normalization.json
+    colorspace: grayscale-replicated
+  loader: {batch_size: 64, num_workers: 4, pin_memory: true}
+  split: {train_fraction: 0.9, seed: 8000, algorithm: frozen_tvsd_dataset_v1}
+model:
+  family: transformer_neural
+  backbone:
+    kind: zwm
+    repo_root: /mnt/tvsd/code/ZWM
+    model_ref: awwkl/zwm-bvd-170m/model.pt
+    layer: transformer.h.22
+    pooling: mean
+    cache_chunk_size: 256
+    forward_mode: one_image
+    input_mode: grayscale_rgb
+  readout:
+    outdims: 1173
+    outdims_by_animal: {F: 804, N: 369}
+training:
+  strategy: frozen_ridge
+  ensemble_members: 1
+  member_seeds: [8000]
+  seed: 8000
+ridge:
+  solver: spectral  # or sklearn_reference (slow, for validation)
+  alphas: [0.01, 0.1, 1.0, 10.0, 100.0]
+  cv_folds: 5
+evaluation:
+  primary_metric: corr_to_average
+  save_predictions: false
+reproducibility:
+  cudnn_benchmark: false
+  cudnn_deterministic: false
+  cuda_matmul_allow_tf32: false
+  cudnn_allow_tf32: true
+  deterministic_algorithms: false
+  full_dataset_sha256: false

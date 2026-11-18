@@ -1,0 +1,3300 @@
+diff --git a/README.md b/README.md
+index fc97ce4..a1a8e23 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,30 @@
+-# Waveform-aware TVSD preprocessing
++# TVSD trainer and waveform-aware preprocessing
++
++One repository for two neural encoding model families and their shared TVSD
++experiment registry:
++
++- `sinz_model/`: Sinz-style ConvNeXt model, training, evaluation and Optuna
++  ask/tell batching. Config: `configs/tvsd_default.yaml`.
++- `transformer_model/`: frozen ZWM features, grouped masked ridge and model
++  export. Config: `configs/tvsd_zwm_ridge.yaml`. See
++  [ZWM runtime and MetaCentrum instructions](transformer_model/README.md).
++- `waveform_aware_tvsd_preprocessing/`: source data preparation and neuron
++  tracking. Its [README](waveform_aware_tvsd_preprocessing/README.md) covers
++  the preprocessing pipeline.
++
++PBS submission is **opt-in**. Optuna `submit` previews commands unless
++`--execute` is supplied; standalone ZWM runs use `jobs/zwm_train.pbs`.
++Training workers never write the central SQLite file. Manual or explicitly
++scheduled collectors publish results under one coordinator lock after the jobs
++finish.
++
++Quick offline safety check (stdlib only):
++
++```bash
++python -m unittest discover -s tests -p test_lock_smoke.py -v
++```
++
++## Preprocessing handoff notes
+ 
+ **Preprocessing and loading only.** This standalone package is distilled from the
+ KS4 → THINGS pipeline. It adds **waveform classifications** to the extracted unit inventory,
+diff --git a/configs/README.md b/configs/README.md
+index dfde1ab..a40a04a 100644
+--- a/configs/README.md
++++ b/configs/README.md
+@@ -1,6 +1,12 @@
+ # TVSD configurations
+ 
+-No trainer configuration has been copied into this scaffold yet. The existing
+-Sinz model/train/search configs will be adapted **after inspecting the actual
+-`spikes_filtered` and stimulus metadata**. This prevents embedding the original
+-Cadena crops, normalizations, response bins, and 458-neuron assumptions.
++- `tvsd_default.yaml`: Sinz ConvNeXt model, training and split defaults.
++- `tvsd_zwm_ridge.yaml`: frozen ZWM features and masked ridge readout. Runs
++  in Python 3.10; check the exact neuron cohort and upstream checkpoint first.
++- `tvsd_optuna_space.yaml`: **Sinz SGD only**, not a ZWM search space.
++- `tvsd_search_space.yaml`, `tvsd_screen_plan.yaml`, `tvsd_local_sweep.yaml`:
++  local screening and search plans.
++
++Use explicit host/container paths for a MetaCentrum deployment. Do not point a
++PBS worker at the central SQLite file for writes. See
++[`transformer_model/README.md`](../transformer_model/README.md).
+diff --git a/configs/tvsd_zwm_ridge.yaml b/configs/tvsd_zwm_ridge.yaml
+new file mode 100644
+index 0000000..6e3d65e
+--- /dev/null
++++ b/configs/tvsd_zwm_ridge.yaml
+@@ -0,0 +1,55 @@
++# Single sinz-base.sif, with external Brno2 Python 3.9 and 3.10 prefixes.
++# Python 3.10 must be created and verified on MetaCentrum before use.
++project:
++  name: tvsd-zwm-170m-ridge
++  output_root: /mnt/tvsd/results
++  sqlite_path: /mnt/tvsd/results/results.sqlite
++  result_sheet_path: /mnt/tvsd/results/runs.csv
++  feature_cache_root: /mnt/tvsd/results/zwm_feature_cache
++runtime:
++  python_executable: /storage/brno2/home/jonas_prokop/visual_models/envs/zwm-py310/bin/python
++
++data:
++  kind: tvsd
++  root: /mnt/tvsd/data/tvsd_waveform_aware_v1/model_dataset
++  dataset_module_path: /project/waveform_aware_tvsd_preprocessing/scripts/dataset.py
++  image_root: /mnt/tvsd/data/assets/THINGS
++  preprocessing:
++    expected_output_hw: [224,224]
++    normalization_path: /mnt/tvsd/data/tvsd_waveform_aware_v1/model_dataset/normalization.json
++    colorspace: grayscale-replicated
++  loader: {batch_size: 64, num_workers: 4, pin_memory: true}
++  split: {train_fraction: 0.9, seed: 8000, algorithm: frozen_tvsd_dataset_v1}
++model:
++  family: transformer_neural
++  backbone:
++    kind: zwm
++    repo_root: /mnt/tvsd/code/ZWM
++    model_ref: awwkl/zwm-bvd-170m/model.pt
++    layer: transformer.h.22
++    pooling: mean
++    cache_chunk_size: 256
++    forward_mode: one_image
++    input_mode: grayscale_rgb
++  readout:
++    outdims: 1173
++    outdims_by_animal: {F: 804, N: 369}
++training:
++  strategy: frozen_ridge
++  ensemble_members: 1
++  member_seeds: [8000]
++  seed: 8000
++ridge:
++  solver: spectral  # or sklearn_reference (slow, for validation)
++  alphas: [0.01, 0.1, 1.0, 10.0, 100.0]
++  cv_folds: 5
++evaluation:
++  primary_metric: corr_to_average
++  save_predictions: false
++reproducibility:
++  cudnn_benchmark: false
++  cudnn_deterministic: false
++  cuda_matmul_allow_tf32: false
++  cudnn_allow_tf32: true
++  deterministic_algorithms: false
++  full_dataset_sha256: false
+diff --git a/jobs/optuna_collect.pbs b/jobs/optuna_collect.pbs
+index eba7bcb..be4e07c 100755
+--- a/jobs/optuna_collect.pbs
++++ b/jobs/optuna_collect.pbs
+@@ -5,7 +5,7 @@
+ 
+ set -euo pipefail
+ ROOT=/storage/brno2/home/jonas_prokop/visual_models
+-CODE="$ROOT/code/papala_tvsd_trainer"
++CODE="$ROOT/code/papala_tsvd_trainer"
+ SIF="$ROOT/containers/sinz-base.sif"
+ PYTHON=/mnt/tvsd/envs/tvsd-py39/bin/python
+ : "${OPTUNA_EXPERIMENT:?missing OPTUNA_EXPERIMENT}"
+diff --git a/jobs/optuna_trial.pbs b/jobs/optuna_trial.pbs
+index e431734..d3097cb 100755
+--- a/jobs/optuna_trial.pbs
++++ b/jobs/optuna_trial.pbs
+@@ -5,7 +5,7 @@
+ 
+ set -euo pipefail
+ ROOT=/storage/brno2/home/jonas_prokop/visual_models
+-CODE="$ROOT/code/papala_tvsd_trainer"
++CODE="$ROOT/code/papala_tsvd_trainer"
+ SIF="$ROOT/containers/sinz-base.sif"
+ PYTHON=/mnt/tvsd/envs/tvsd-py39/bin/python
+ : "${OPTUNA_EXPERIMENT:?qsub -v OPTUNA_EXPERIMENT=...}"
+@@ -33,17 +33,94 @@ assert len(match)==1,match
+ print(match[0]['trial_dir'])
+ PY
+ )
++# All families use the same immutable SIF. Only the Python prefix changes.
++FAMILY=$(python3 - "$TRIAL_DIR/config.json" <<'PYCONFIG'
++import json,sys
++cfg=json.load(open(sys.argv[1]))
++print(cfg.get('model',{}).get('family','sinz'))
++PYCONFIG
++)
++if [ "$FAMILY" = transformer_neural ]; then
++  PYTHON="$ROOT/envs/zwm-py310/bin/python"
++  [ -d "$ROOT/code/ZWM" ] || { echo 'Missing upstream ZWM checkout' >&2; exit 3; }
++elif [ "$FAMILY" != sinz ]; then
++  echo "Unsupported model family $FAMILY" >&2; exit 3
++fi
++[ -f "$SIF" ] && [ -f "$PYTHON" ] || { echo "Missing image or Python: $SIF $PYTHON" >&2; exit 3; }
++printf 'FAMILY=%s IMAGE=%s PYTHON=%s\n' "$FAMILY" "$SIF" "$PYTHON"
+ SEED="$TRIAL_DIR/worker_seed.sqlite"
+ [ -f "$SEED" ] || { echo "Missing worker seed: $SEED" >&2; exit 3; }
+-cp "$SEED" "$SCRATCHDIR/worker.sqlite"
++# On retry recover the LAST worker snapshot, not the initial study seed;
++# otherwise the run/provenance and resumable ridge state are lost.
++SOURCE_DB="$SEED"
++if [ -f "$TRIAL_DIR/worker_result.sqlite" ]; then
++  SOURCE_DB="$TRIAL_DIR/worker_result.sqlite"
++fi
++cp "$SOURCE_DB" "$SCRATCHDIR/worker.sqlite"
++printf 'Worker SQLite source: %s\n' "$SOURCE_DB"
++# SIGKILL never executes Python finally; a dead PBS job can leave this lock.
++# Do not steal a lock from a live job merely because its ID differs.
++LOCK="$TRIAL_DIR/.worker-running"
++if [ -f "$LOCK" ]; then
++  OLD_JOB=$(sed -n 's/^job=\([^ ]*\).*/\1/p' "$LOCK")
++  [ -n "$OLD_JOB" ] && [ "$OLD_JOB" != manual ] && [ "$OLD_JOB" != "$PBS_JOBID" ] || {
++    echo "Ambiguous worker lock: $LOCK" >&2; exit 5;
++  }
++  set +e
++  # OpenPBS retains completed jobs in extended history (-x).
++  OLD_STATUS=$(qstat -x -f "$OLD_JOB" 2>&1)
++  old_rc=$?
++  set -e
++  if [ "$old_rc" -eq 0 ]; then
++    case "$OLD_STATUS" in
++      *"job_state = F"*|*"job_state = C"*|*"job_state = X"*) ;;
++      *) echo "Previous PBS job may still be active: $OLD_JOB" >&2; exit 5 ;;
++    esac
++  else
++    case "$OLD_STATUS" in
++      *"Unknown Job Id"*|*"Unknown Job ID"*) ;;
++      *) echo "Cannot verify old PBS job has exited: $OLD_STATUS" >&2; exit 5 ;;
++    esac
++  fi
++  [ "$(sed -n 's/^job=\([^ ]*\).*/\1/p' "$LOCK")" = "$OLD_JOB" ] || {
++    echo "Worker lock changed while checking it" >&2; exit 5;
++  }
++  rm -- "$LOCK"
++  printf 'Removed stale lock for completed PBS job %s\n' "$OLD_JOB"
++fi
+ 
+-export SINGULARITYENV_PYTHONPATH=/project
++export SINGULARITYENV_PYTHONPATH="/project:$ROOT/code/ZWM"
++export SINGULARITYENV_PYTHONNOUSERSITE=1
+ export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
+ export SINGULARITYENV_HF_HUB_CACHE=/mnt/tvsd/cache/huggingface/hub
++export SINGULARITYENV_HF_HUB_OFFLINE=1
++export SINGULARITYENV_TRANSFORMERS_OFFLINE=1
+ export SINGULARITYENV_TORCH_HOME=/mnt/tvsd/cache/torch
+ export SINGULARITYENV_PYTHONUNBUFFERED=1
+ export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
++export SINGULARITYENV_OPENBLAS_NUM_THREADS=4
++export SINGULARITYENV_MKL_NUM_THREADS=4
++export SINGULARITYENV_OMP_NUM_THREADS=4
+ 
++persist_worker() {
++  if [ -f "$SCRATCHDIR/worker.sqlite" ]; then
++    python3 "$CODE/sinz_model/sqlite_snapshot.py" \
++      --source "$SCRATCHDIR/worker.sqlite" \
++      --destination "$TRIAL_DIR/worker_result.sqlite"
++  fi
++}
++RUN_PID=""
++on_term() {
++  trap - TERM
++  echo 'PBS TERM: requesting worker shutdown and saving SQLite snapshot'
++  if [ -n "$RUN_PID" ]; then
++    kill -TERM "$RUN_PID" 2>/dev/null || true
++    wait "$RUN_PID" || true
++  fi
++  persist_worker || true
++  exit 143
++}
++trap on_term TERM
+ set +e
+ singularity exec --nv \
+   --bind "$CODE:/project" \
+@@ -52,14 +129,13 @@ singularity exec --nv \
+   --bind "$SCRATCHDIR:/worker" \
+   "$SIF" "$PYTHON" -m sinz_model.optuna_worker \
+     --experiment "/mnt/tvsd/$REL" --batch "$OPTUNA_BATCH" \
+-    --index "$PBS_ARRAY_INDEX" --worker-db /worker/worker.sqlite
++    --index "$PBS_ARRAY_INDEX" --worker-db /worker/worker.sqlite &
++RUN_PID=$!
++wait "$RUN_PID"
+ rc=$?
+ set -e
+-# Active SQLite was LOCAL to this node. After Python exits all handles are closed,
+-# and we persist only this worker's completed/partial DB for the collector.
+-if [ -f "$SCRATCHDIR/worker.sqlite" ]; then
+-  cp "$SCRATCHDIR/worker.sqlite" "$TRIAL_DIR/worker_result.sqlite.pending.$PBS_JOBID"
+-  mv "$TRIAL_DIR/worker_result.sqlite.pending.$PBS_JOBID" "$TRIAL_DIR/worker_result.sqlite"
+-fi
++trap - TERM
++# SQLite's backup API copies a consistent DB including any committed WAL pages.
++persist_worker
+ printf 'FINISH: %s exit=%s\n' "$(date -Is)" "$rc"
+ exit "$rc"
+diff --git a/jobs/zwm_train.pbs b/jobs/zwm_train.pbs
+new file mode 100644
+index 0000000..ab49406
+--- /dev/null
++++ b/jobs/zwm_train.pbs
+@@ -0,0 +1,85 @@
++#!/bin/bash
++#PBS -N tvsd_zwm_ridge
++#PBS -q gpu
++#PBS -l select=1:ncpus=4:mem=48gb:ngpus=1:scratch_local=10gb
++#PBS -l walltime=12:00:00
++set -euo pipefail
++ROOT=/storage/brno2/home/jonas_prokop/visual_models
++CODE="$ROOT/code/papala_tsvd_trainer"
++SIF="$ROOT/containers/sinz-base.sif"
++PYTHON="$ROOT/envs/zwm-py310/bin/python"
++: "${CANDIDATE_ID:?Pass CANDIDATE_ID using qsub -v}"
++: "${PBS_JOBID:?Run through PBS}"
++: "${SCRATCHDIR:?requires scratch_local}"
++for item in "$SIF" "$PYTHON" "$ROOT/data/tvsd_waveform_aware_v1/model_dataset/dataset_info.json"; do
++  [ -f "$item" ] || { echo "Missing file: $item" >&2; exit 2; }
++done
++[ -d "$ROOT/code/ZWM" ] || { echo 'Missing upstream ZWM checkout' >&2; exit 2; }
++[ -d "$ROOT/data/assets/THINGS" ] || { echo 'Missing THINGS images' >&2; exit 2; }
++mkdir -p "$ROOT/logs" "$ROOT/results" "$ROOT/cache/huggingface" "$ROOT/cache/torch"
++exec > "$ROOT/logs/zwm.${PBS_JOBID}.log" 2>&1
++export SINGULARITYENV_PYTHONPATH="/project:$ROOT/code/ZWM"
++export SINGULARITYENV_PYTHONNOUSERSITE=1
++export SINGULARITYENV_PYTHONUNBUFFERED=1
++export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
++export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
++export SINGULARITYENV_HF_HUB_CACHE=/mnt/tvsd/cache/huggingface/hub
++export SINGULARITYENV_HF_HUB_OFFLINE=1
++export SINGULARITYENV_TRANSFORMERS_OFFLINE=1
++export SINGULARITYENV_TORCH_HOME=/mnt/tvsd/cache/torch
++export SINGULARITYENV_OPENBLAS_NUM_THREADS=4
++export SINGULARITYENV_MKL_NUM_THREADS=4
++export SINGULARITYENV_OMP_NUM_THREADS=4
++# Preserve the established UUID -> CUDA index fix on PBS GPU allocations.
++if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* && "${CUDA_VISIBLE_DEVICES}" != *,* ]]; then
++  index=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | \
++          awk -F, -v uuid="$CUDA_VISIBLE_DEVICES" '{gsub(/^[ \t]+|[ \t]+$/, "", $1);gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($2==uuid) print $1}')
++  [[ "$index" =~ ^[0-9]+$ ]] || { echo 'Cannot resolve PBS GPU UUID' >&2; exit 4; }
++  export SINGULARITYENV_CUDA_VISIBLE_DEVICES="$index"
++fi
++printf 'ZWM START host=%s job=%s python=%s image=%s\n' "$(hostname)" "$PBS_JOBID" "$PYTHON" "$SIF"
++CENTRAL_DB="$ROOT/results/results.sqlite"
++LOCAL_DB="$SCRATCHDIR/zwm_worker.sqlite"
++HANDOFF_DIR="$ROOT/results/zwm_handoffs/$CANDIDATE_ID"
++HANDOFF_DB="$HANDOFF_DIR/$PBS_JOBID.sqlite"
++mkdir -p "$HANDOFF_DIR"
++# Read central only to obtain a consistent seed. The compute node NEVER writes it.
++python3 "$CODE/sinz_model/sqlite_snapshot.py" \
++  --source "$CENTRAL_DB" --destination "$LOCAL_DB"
++persist_worker() {
++  if [ -f "$LOCAL_DB" ]; then
++    python3 "$CODE/sinz_model/sqlite_snapshot.py" \
++      --source "$LOCAL_DB" --destination "$HANDOFF_DB"
++    printf 'ZWM handoff: %s\n' "$HANDOFF_DB"
++  fi
++}
++RUN_PID=""
++on_term() {
++  trap - TERM
++  echo "PBS TERM: asking ZWM to exit and capturing worker SQLite"
++  if [ -n "$RUN_PID" ]; then
++    kill -TERM "$RUN_PID" 2>/dev/null || true
++    wait "$RUN_PID" || true
++  fi
++  persist_worker || true
++  exit 143
++}
++trap on_term TERM
++# Host prefix stays visible under the SAME absolute path inside the container.
++set +e
++singularity exec --nv \
++  --bind "$CODE:/project" \
++  --bind "$ROOT:/mnt/tvsd" \
++  --bind "$ROOT:$ROOT" \
++  --bind "$SCRATCHDIR:/worker" \
++  "$SIF" "$PYTHON" -m transformer_model.launch \
++    --sqlite-path /worker/zwm_worker.sqlite \
++    --candidate-id "$CANDIDATE_ID" --member 0 &
++RUN_PID=$!
++wait "$RUN_PID"
++rc=$?
++set -e
++trap - TERM
++persist_worker
++printf 'ZWM FINISH exit=%s job=%s\n' "$rc" "$PBS_JOBID"
++exit "$rc"
+diff --git a/requirements-transformer-extra.txt b/requirements-transformer-extra.txt
+new file mode 100644
+index 0000000..f7a3f04
+--- /dev/null
++++ b/requirements-transformer-extra.txt
+@@ -0,0 +1,6 @@
++# Install IN the separate Python 3.10 / ZWM environment, after upstream ZWM.
++# ZWM upstream owns its own torch, CUDA, and inference dependency versions.
++scikit-learn>=1.4,<2
++pandas>=2.0,<3
++PyYAML>=6,<7
++optuna>=4.8,<5  # only needed when ZWM is used as an Optuna PBS worker
+diff --git a/sinz_model/cli.py b/sinz_model/cli.py
+index 1f93287..94e2c61 100644
+--- a/sinz_model/cli.py
++++ b/sinz_model/cli.py
+@@ -44,10 +44,14 @@ def command_init_db(args) -> None:
+ def command_export_bundle(args) -> None:
+     from .export_bundle import export_bundle
+ 
+-    print(export_bundle(
+-        str(Path(args.output_root).resolve() / "results.sqlite"),
+-        args.candidate_id, args.destination,
+-    ))
++    registry_path = str(Path(args.output_root).resolve() / "results.sqlite")
++    reg = RunRegistry(registry_path)
++    cfg = reg.get_candidate_config(args.candidate_id)
++    if cfg.get("model", {}).get("family", "sinz") == "transformer_neural":
++        from .transformer_bridge import export_transformer_bundle
++        print(export_transformer_bundle(cfg, registry_path, args.candidate_id, args.destination))
++    else:
++        print(export_bundle(registry_path, args.candidate_id, args.destination))
+ 
+ 
+ def command_audit_data(args) -> None:
+@@ -148,6 +152,12 @@ def command_eval(args) -> None:
+     reg.initialize()
+     run = reg.get_run(args.run_id)
+     cfg = json.loads(run["config_json"])
++    if cfg.get("model", {}).get("family", "sinz") == "transformer_neural":
++        if args.checkpoint is not None:
++            raise ValueError("Transformer evaluation uses the registered best checkpoint")
++        from .transformer_bridge import evaluate_transformer_run
++        _json(evaluate_transformer_run(cfg, reg.sqlite_path, args.run_id))
++        return
+     checkpoint = args.checkpoint or reg.best_checkpoint(args.run_id)
+     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+     metrics, collected = evaluate_checkpoint(cfg, checkpoint, device)
+@@ -200,7 +210,16 @@ def command_candidates(args) -> None:
+     reg = _registry(args.output_root)
+     reg.initialize()
+     cmd = args.candidates_command
+-    if cmd == "list":
++    if cmd == "create":
++        cfg = load_config(args.config)
++        config_db = Path(cfg["project"]["sqlite_path"]).resolve()
++        if config_db != Path(reg.sqlite_path).resolve():
++            raise ValueError(f"Config SQLite path {config_db} differs from registry {reg.sqlite_path}")
++        workflow_id = (args.workflow_id if args.workflow_id else
++                       reg.create_workflow(args.workflow_name))
++        result = reg.create_candidate(workflow_id, args.stage, cfg, notes=args.notes)
++        _json({"workflow_id": workflow_id, **result})
++    elif cmd == "list":
+         rows = reg.list_candidates(
+             workflow_id=args.workflow_id,
+             stage=args.stage,
+@@ -480,6 +499,14 @@ def build_parser() -> argparse.ArgumentParser:
+     _add_output_root(p)
+     csub = p.add_subparsers(dest="candidates_command", required=True)
+ 
++    q = csub.add_parser("create", help="register a config as a candidate in the project database")
++    q.add_argument("--config", required=True)
++    work = q.add_mutually_exclusive_group(required=True)
++    work.add_argument("--workflow-id")
++    work.add_argument("--workflow-name")
++    q.add_argument("--stage", default="search")
++    q.add_argument("--notes", default=None)
++
+     q = csub.add_parser("list")
+     q.add_argument("--workflow-id", default=None)
+     q.add_argument("--stage", choices=("search", "sweep"), default=None)
+diff --git a/sinz_model/optuna_batch.py b/sinz_model/optuna_batch.py
+index 1db2567..80dfe8d 100644
+--- a/sinz_model/optuna_batch.py
++++ b/sinz_model/optuna_batch.py
+@@ -25,6 +25,9 @@ import yaml
+ from optuna.trial import TrialState
+ 
+ from .orchestrator import RunRegistry
++from .owner_lock import break_owner_lock, owner_lock
++from .registry_handoff import project_writer_lock
++from .sqlite_snapshot import atomic_snapshot, sqlite_snapshot
+ 
+ OPTUNA_VERSION = optuna.__version__
+ RESERVED = {'training.member_seeds', 'training.ensemble_members'}
+@@ -137,21 +140,9 @@ def _sample(trial, specs):
+     return params
+ 
+ 
+-@contextmanager
+ def _lock(root: Path):
+-    """Coordinator jobs serialize through atomic directory creation (not flock/NFS)."""
+-    root.mkdir(parents=True, exist_ok=True)
+-    lock = root / '.coordinator.lock'
+-    try:
+-        lock.mkdir(mode=0o700)
+-    except FileExistsError as exc:
+-        raise RuntimeError(f'Coordinator lock exists: {lock}. Inspect before removing.') from exc
+-    try:
+-        (lock / 'owner').write_text(f'pid={os.getpid()}\n')
+-        yield
+-    finally:
+-        (lock / 'owner').unlink(missing_ok=True)
+-        lock.rmdir()
++    """Serialize one Optuna study's prepare/submit/collect operations."""
++    return owner_lock(root / '.coordinator.lock')
+ 
+ 
+ def _experiment(root: Path):
+@@ -168,18 +159,6 @@ def _db(meta):
+     return Path(meta['project_db']).resolve()
+ 
+ 
+-def _sqlite_snapshot(source: Path, target: Path):
+-    """Consistent SQLite backup even if the source has a journal."""
+-    target.parent.mkdir(parents=True, exist_ok=True)
+-    if target.exists():
+-        raise FileExistsError(target)
+-    if not source.exists():
+-        raise FileNotFoundError(source)
+-    with sqlite3.connect(f'file:{source}?mode=ro', uri=True) as s:
+-        with sqlite3.connect(str(target)) as d:
+-            s.backup(d)
+-
+-
+ @contextmanager
+ def _central(root: Path, meta: dict):
+     """Run the sole coordinator on local scratch, publish atomically on success.
+@@ -189,11 +168,12 @@ def _central(root: Path, meta: dict):
+     """
+     db = _db(meta)
+     db.parent.mkdir(parents=True, exist_ok=True)
+-    with tempfile.TemporaryDirectory(prefix='tvsd-coordinator-', dir=os.environ.get('TMPDIR') or None) as tmp:
++    with project_writer_lock(db), tempfile.TemporaryDirectory(
++            prefix='tvsd-coordinator-', dir=os.environ.get('TMPDIR') or None) as tmp:
+         local = Path(tmp) / 'project.sqlite'
+         fingerprint = ((db.stat().st_size, db.stat().st_mtime_ns) if db.exists() else None)
+         if db.exists():
+-            _sqlite_snapshot(db, local)
++            sqlite_snapshot(db, local)
+         registry = RunRegistry(str(local))
+         registry.initialize()
+         with registry.connect() as con:
+@@ -219,14 +199,7 @@ def _central(root: Path, meta: dict):
+             current = ((db.stat().st_size, db.stat().st_mtime_ns) if db.exists() else None)
+             if current != fingerprint:
+                 raise RuntimeError('Central project database changed during coordination; refusing overwrite')
+-            published = db.with_name(f'{db.name}.tmp.{os.getpid()}')
+-            try:
+-                with sqlite3.connect(str(local)) as source:
+-                    with sqlite3.connect(str(published)) as dest:
+-                        source.backup(dest)
+-                os.replace(published, db)
+-            finally:
+-                published.unlink(missing_ok=True)
++            atomic_snapshot(local, db)
+ 
+ 
+ def _workspace(root: Path):
+@@ -258,15 +231,22 @@ def initialize(args):
+             raise FileExistsError('Study already initialized')
+         base = yaml.safe_load(Path(args.config).read_text())
+         specs = _space(Path(args.space), base)
+-        if args.epochs is not None:
+-            base['training']['total_epochs'] = int(args.epochs)
+-        if args.phase1_epochs is not None:
+-            base['training']['readout_only_epochs'] = int(args.phase1_epochs)
+-        if not 0 < int(base['training']['readout_only_epochs']) < int(base['training']['total_epochs']):
+-            raise ValueError('Require >=1 readout-only and >=1 joint epoch')
++        strategy = base.get('training', {}).get('strategy', 'gradient')
++        if strategy == 'frozen_ridge':
++            if args.epochs is not None or args.phase1_epochs is not None:
++                raise ValueError('SGD epoch budgets do not apply to frozen_ridge')
++            if args.prune or args.train_batches is not None or args.val_batches is not None:
++                raise ValueError('frozen_ridge requires no epoch pruning or batch limits')
++        else:
++            if args.epochs is not None:
++                base['training']['total_epochs'] = int(args.epochs)
++            if args.phase1_epochs is not None:
++                base['training']['readout_only_epochs'] = int(args.phase1_epochs)
++            if not 0 < int(base['training']['readout_only_epochs']) < int(base['training']['total_epochs']):
++                raise ValueError('Require >=1 readout-only and >=1 joint epoch')
+         base['training']['ensemble_members'] = 1
+         base['training']['member_seeds'] = [int(args.member_seed)]
+-        project_db = Path(args.project_db or workspace / 'results' / 'project.sqlite').resolve()
++        project_db = Path(args.project_db or workspace / 'results' / 'results.sqlite').resolve()
+         if not project_db.is_relative_to(workspace):
+             raise ValueError('Project DB must be inside the shared workspace')
+         meta = {
+@@ -340,7 +320,8 @@ def prepare(args):
+                 cfg['data']['image_root'] = str(Path(args.image_root or workspace / 'data' / 'assets' / 'THINGS').resolve())
+                 cfg['data']['preprocessing']['normalization_path'] = str(Path(cfg['data']['root']) / 'normalization.json')
+                 cfg['data']['dataset_module_path'] = '/project/waveform_aware_tvsd_preprocessing/scripts/dataset.py'
+-                cfg['training']['progress']['enabled'] = False
++                if isinstance(cfg['training'].get('progress'), dict):
++                    cfg['training']['progress']['enabled'] = False
+                 trial.set_user_attr('batch', batch_name)
+                 _write(trial_dir / 'config.json', cfg)
+                 records.append({
+@@ -357,7 +338,7 @@ def prepare(args):
+         for record in records:
+             snapshot = Path(record['trial_dir']) / 'worker_seed.sqlite'
+             if not snapshot.exists():
+-                _sqlite_snapshot(_db(meta), snapshot)
++                sqlite_snapshot(_db(meta), snapshot)
+         print(f'Prepared {n} private read-only snapshots and configs in {batch}')
+ 
+ 
+@@ -383,9 +364,11 @@ def submit(args):
+         paths = Path(__file__).resolve().parents[1] / 'jobs'
+         env = _pbs_env(root, manifest['batch'])
+         array = ['qsub', '-J', f'1-{n}', f'%{cap}', '-v', env, str(paths / 'optuna_trial.pbs')]
+-        if args.dry_run:
++        if args.dry_run or not getattr(args, 'execute', False):
+             print('Array:', ' '.join(array))
+-            print('Collector: qsub -W depend=afterany:<array-id> -v ' + env + ' ' + str(paths / 'optuna_collect.pbs'))
++            print('After the array ends, collect manually: python -m sinz_model.optuna_batch collect --root ' + str(root))
++            if not args.dry_run:
++                print('PREVIEW ONLY: add --execute to submit PBS jobs')
+             return
+         manifest['submission_pending'] = True
+         _write(active, manifest)
+@@ -399,6 +382,12 @@ def submit(args):
+             raise RuntimeError('qsub array returned empty job ID; inspect qstat')
+         manifest['array_job_id'] = array_id
+         _write(active, manifest)
++        if not getattr(args, 'schedule_collector', False):
++            manifest['submission_pending'] = False
++            _write(active, manifest)
++            print(f'Scheduled only array {array_id} ({n} trials, cap {cap})')
++            print('When it finishes, collect manually: python -m sinz_model.optuna_batch collect --root ' + str(root))
++            return
+         collector_cmd = ['qsub', '-W', f'depend=afterany:{array_id}', '-v', env,
+                          str(paths / 'optuna_collect.pbs')]
+         # A collection submission failure must NOT schedule the array twice.
+@@ -576,6 +565,12 @@ def status(args):
+                   'collector:', manifest['collector_job_id'])
+ 
+ 
++def break_study_lock(args):
++    """Opt-in recovery of a study lock left by a dead local process."""
++    lock = Path(args.root).resolve() / '.coordinator.lock'
++    print('REMOVED_STALE_LOCK=' + str(break_owner_lock(lock)))
++
++
+ def parser():
+     p = argparse.ArgumentParser(description=__doc__)
+     sub = p.add_subparsers(dest='command', required=True)
+@@ -605,6 +600,10 @@ def parser():
+     q.add_argument('--root', required=True)
+     q.add_argument('--concurrency', type=int, default=4)
+     q.add_argument('--dry-run', action='store_true')
++    q.add_argument('--execute', action='store_true',
++                   help='Required explicit opt-in to submit any PBS jobs')
++    q.add_argument('--schedule-collector', action='store_true',
++                   help='Opt in to an additional PBS collector job; manual collection is default')
+     q.set_defaults(func=submit)
+     q = sub.add_parser('collect')
+     q.add_argument('--root', required=True)
+@@ -613,6 +612,9 @@ def parser():
+     q = sub.add_parser('status')
+     q.add_argument('--root', required=True)
+     q.set_defaults(func=status)
++    q = sub.add_parser('break-lock')
++    q.add_argument('--root', required=True)
++    q.set_defaults(func=break_study_lock)
+     return p
+ 
+ 
+diff --git a/sinz_model/optuna_worker.py b/sinz_model/optuna_worker.py
+index 499fbe4..18aafb2 100644
+--- a/sinz_model/optuna_worker.py
++++ b/sinz_model/optuna_worker.py
+@@ -104,6 +104,13 @@ def execute(experiment: Path, batch: str, index: int, worker_db: Path):
+     if trial_dir.parent != root / 'trials':
+         raise ValueError('Trial directory outside study')
+     cfg = json.loads((trial_dir / 'config.json').read_text())
++    if cfg.get('model',{}).get('family') == 'transformer_neural':
++        meta_check=json.loads((root / 'experiment.json').read_text())
++        if cfg.get('training',{}).get('strategy') != 'frozen_ridge':
++            raise NotImplementedError('Only frozen_ridge is currently available for ZWM')
++        if (meta_check.get('prune') or meta_check.get('train_batches') is not None
++                or meta_check.get('val_batches') is not None):
++            raise ValueError('Frozen ridge requires pruning=False and unlimited train/val batches')
+     if _digest(cfg) != record['config_sha256']:
+         raise RuntimeError('Frozen trial config modified')
+     result_path = trial_dir / 'result.json'
+@@ -164,9 +171,13 @@ def execute(experiment: Path, batch: str, index: int, worker_db: Path):
+                 if runs and runs[0]['status'] == 'completed':
+                     pass
+                 elif runs:
+-                    checkpoint = Path(runs[0]['run_dir']) / 'checkpoints' / 'latest.pt'
+-                    if not checkpoint.exists():
+-                        raise RuntimeError('Cannot resume worker: latest.pt missing')
++                    if not (cfg.get('model', {}).get('family') == 'transformer_neural'
++                            and cfg.get('training', {}).get('strategy') == 'frozen_ridge'):
++                        checkpoint = Path(runs[0]['run_dir']) / 'checkpoints' / 'latest.pt'
++                        if not checkpoint.exists():
++                            raise RuntimeError('Cannot resume worker: latest.pt missing')
++                    # Ridge restarts the fit under the same run ID. The image
++                    # feature cache survives; no SGD checkpoint is expected.
+                     train_member(cfg, 0, candidate_id=candidate_id, resume_run_id=run_id,
+                                  evaluate_test=False, limit_train_batches=meta['train_batches'],
+                                  limit_val_batches=meta['val_batches'], on_epoch_end=report)
+diff --git a/sinz_model/owner_lock.py b/sinz_model/owner_lock.py
+new file mode 100644
+index 0000000..1a48a40
+--- /dev/null
++++ b/sinz_model/owner_lock.py
+@@ -0,0 +1,70 @@
++"""Recoverable single-host ownership checks for filesystem mkdir locks.
++
++Creation is atomic on a shared filesystem. Recovery is conservative: a lock
++from another host, an unknown PID, or an unrecognized record is never stolen.
++"""
++from __future__ import annotations
++
++import os
++import re
++import socket
++from contextlib import contextmanager
++from pathlib import Path
++
++
++OWNER_PATTERN = re.compile(r"host=([^\s]+) pid=([1-9][0-9]*)\n?\Z")
++
++
++@contextmanager
++def owner_lock(lock: Path):
++    """Atomic mkdir lock with a host/PID owner record."""
++    lock = Path(lock)
++    lock.parent.mkdir(parents=True, exist_ok=True)
++    try:
++        lock.mkdir(mode=0o700)
++    except FileExistsError as exc:
++        raise RuntimeError(f"Coordinator already active: {lock}") from exc
++    try:
++        (lock / "owner").write_text(f"host={socket.gethostname()} pid={os.getpid()}\n")
++        yield
++    finally:
++        (lock / "owner").unlink(missing_ok=True)
++        lock.rmdir()
++
++
++def break_owner_lock(lock: Path) -> Path:
++    """Remove a stale lock only when the recorded PID is dead on this host."""
++    lock = Path(lock)
++    owner = lock / "owner"
++    if lock.is_symlink() or not lock.is_dir() or owner.is_symlink() or not owner.is_file():
++        raise RuntimeError(f"Missing or unverifiable coordinator lock owner: {lock}")
++
++    def signature(path: Path):
++        stat = path.stat()
++        return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
++
++    initial_lock_stat = signature(lock)
++    initial_owner_stat = signature(owner)
++    contents = owner.read_text(encoding="utf-8")
++    match = OWNER_PATTERN.fullmatch(contents)
++    if match is None:
++        raise RuntimeError(f"Invalid coordinator lock owner record: {owner}")
++    host, pid = match.group(1), int(match.group(2))
++    if host != socket.gethostname():
++        raise RuntimeError(f"Lock belongs to {host}; check it on that host")
++    try:
++        os.kill(pid, 0)
++    except ProcessLookupError:
++        pass
++    except OSError as exc:
++        raise RuntimeError(f"Cannot verify lock owner PID {pid} is dead") from exc
++    else:
++        raise RuntimeError(f"Coordinator lock owner PID {pid} is still alive")
++    if (signature(lock) != initial_lock_stat or signature(owner) != initial_owner_stat or
++            owner.read_text(encoding="utf-8") != contents):
++        raise RuntimeError("Coordinator lock changed during recovery")
++    if list(lock.iterdir()) != [owner]:
++        raise RuntimeError(f"Unexpected files inside coordinator lock: {lock}")
++    owner.unlink()
++    lock.rmdir()
++    return lock
+diff --git a/sinz_model/registry_handoff.py b/sinz_model/registry_handoff.py
+new file mode 100644
+index 0000000..25e6cb8
+--- /dev/null
++++ b/sinz_model/registry_handoff.py
+@@ -0,0 +1,147 @@
++"""Single-writer collection of standalone PBS runs into the project registry.
++
++Training workers never write to the Brno2 SQLite file. Each worker writes one
++scratch-local database and returns a handoff. A separate collection command
++imports only the selected run and atomically publishes the updated registry.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import tempfile
++from contextlib import contextmanager
++from pathlib import Path
++
++from .orchestrator import RunRegistry, candidate_config_sha256
++from .owner_lock import break_owner_lock, owner_lock
++from .sqlite_snapshot import atomic_snapshot, sqlite_snapshot
++
++
++CHILDREN = ("params", "seeds", "epochs", "metrics", "checkpoints", "artifacts", "progress")
++SKIP_IDS = {"metric_id", "artifact_id", "checkpoint_id"}
++def _lock_path(project_db: Path) -> Path:
++    return Path(str(Path(project_db).resolve()) + ".coordinator.lock")
++
++
++@contextmanager
++def project_writer_lock(project_db: Path):
++    """Shared lock for the single authoritative project SQLite file."""
++    with owner_lock(_lock_path(project_db)):
++        yield
++
++
++def break_lock(project_db: Path) -> Path:
++    """Recover the project database lock; refuse unverifiable owners."""
++    return break_owner_lock(_lock_path(project_db))
++
++
++def _copy_rows(con, table, selector, key):
++    columns = [row[1] for row in con.execute(f'PRAGMA worker.table_info("{table}")')
++               if row[1] not in SKIP_IDS]
++    if not columns:
++        raise RuntimeError(f"Missing worker table: {table}")
++    quoted = ", ".join(f'"{col}"' for col in columns)
++    con.execute(f'INSERT INTO main."{table}" ({quoted}) '
++                f'SELECT {quoted} FROM worker."{table}" WHERE {selector}', (key,))
++
++
++def _copy_run(con, run_id, *, replace):
++    if replace:
++        for table in CHILDREN:
++            con.execute(f'DELETE FROM main."{table}" WHERE run_id=?', (run_id,))
++        con.execute("DELETE FROM main.runs WHERE run_id=?", (run_id,))
++    _copy_rows(con, "runs", "run_id=?", run_id)
++    for table in CHILDREN:
++        _copy_rows(con, table, "run_id=?", run_id)
++
++
++def _merge_local(project_copy: Path, handoff: Path, candidate_id: str):
++    registry = RunRegistry(str(project_copy))
++    registry.initialize()
++    central = registry.get_candidate(candidate_id)
++    with registry.connect() as con:
++        con.execute("ATTACH DATABASE ? AS worker", (str(handoff),))
++        try:
++            worker_candidate = con.execute(
++                "SELECT config_sha256 FROM worker.candidates WHERE candidate_id=?",
++                (candidate_id,),
++            ).fetchone()
++            if not worker_candidate or worker_candidate["config_sha256"] != central["config_sha256"]:
++                raise ValueError("Worker candidate identity differs from central registry")
++            rows = con.execute(
++                "SELECT * FROM worker.runs WHERE candidate_id=? AND member_index=0",
++                (candidate_id,),
++            ).fetchall()
++            if len(rows) != 1:
++                raise ValueError("Handoff must contain exactly one candidate/member run")
++            source = rows[0]
++            run_id = source["run_id"]
++            if candidate_config_sha256(json.loads(source["config_json"])) != central["config_sha256"]:
++                raise ValueError("Worker run changed candidate parameters")
++            if source["status"] not in ("completed", "failed", "running"):
++                raise ValueError(f"Unsupported worker run status: {source['status']}")
++            existing = con.execute("SELECT run_id,status,created_at_utc FROM main.runs "
++                                   "WHERE candidate_id=? AND member_index=0",
++                                   (candidate_id,)).fetchone()
++            if existing and existing["run_id"] != run_id:
++                raise RuntimeError("Central candidate already has a different run ID")
++            if existing and existing["created_at_utc"] != source["created_at_utc"]:
++                raise RuntimeError("Existing run provenance changed")
++            if existing and existing["status"] == "completed":
++                if source["status"] == "completed":
++                    return run_id, False
++                raise RuntimeError("Refusing to downgrade completed central run")
++            status = "completed" if source["status"] == "completed" else "failed"
++            with con:
++                _copy_run(con, run_id, replace=bool(existing))
++                if source["status"] == "running":
++                    con.execute("UPDATE main.runs SET status='failed', "
++                                "error='Worker terminated before completion' WHERE run_id=?",
++                                (run_id,))
++                con.execute("UPDATE main.candidates SET status=?, "
++                            "finished_at_utc=CURRENT_TIMESTAMP WHERE candidate_id=?",
++                            (status, candidate_id))
++            return run_id, True
++        finally:
++            con.execute("DETACH DATABASE worker")
++
++
++def collect(project_db: Path, handoff: Path, candidate_id: str):
++    """Import one worker run, committing the whole central DB atomically."""
++    project_db = Path(project_db).resolve()
++    handoff = Path(handoff).resolve()
++    if project_db == handoff or not project_db.is_file() or not handoff.is_file():
++        raise ValueError("Expected two existing, distinct registry files")
++    with project_writer_lock(project_db):
++        fingerprint = (project_db.stat().st_size, project_db.stat().st_mtime_ns)
++        with tempfile.TemporaryDirectory(prefix="tvsd-collect-") as directory:
++            local = Path(directory) / "project.sqlite"
++            sqlite_snapshot(project_db, local)
++            run_id, changed = _merge_local(local, handoff, candidate_id)
++            if changed:
++                current = (project_db.stat().st_size, project_db.stat().st_mtime_ns)
++                if current != fingerprint:
++                    raise RuntimeError("Central registry changed during collection; refusing publish")
++                atomic_snapshot(local, project_db)
++    return run_id
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    sub = parser.add_subparsers(dest="operation", required=True)
++    merge = sub.add_parser("collect")
++    merge.add_argument("--project-db", required=True)
++    merge.add_argument("--worker-db", required=True)
++    merge.add_argument("--candidate-id", required=True)
++    recovery = sub.add_parser("break-lock")
++    recovery.add_argument("--project-db", required=True)
++    args = parser.parse_args()
++    if args.operation == "collect":
++        print("COLLECTED_RUN_ID=" + collect(
++            Path(args.project_db), Path(args.worker_db), args.candidate_id))
++    else:
++        print("REMOVED_STALE_LOCK=" + str(break_lock(Path(args.project_db))))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/sinz_model/search.py b/sinz_model/search.py
+index 5024c65..9e199d6 100644
+--- a/sinz_model/search.py
++++ b/sinz_model/search.py
+@@ -190,6 +190,10 @@ def _prepare_base_config(
+     epochs: Optional[int],
+ ) -> Dict[str, Any]:
+     cfg = load_config(config_path)
++    if cfg.get("model", {}).get("family", "sinz") != "sinz":
++        raise NotImplementedError(
++            "SEARCH is an SGD/Sinz workflow; use ZWM launch or explicit Optuna batches"
++        )
+     root = Path(output_root).resolve()
+     cfg["project"]["output_root"] = str(root / "runs")
+     cfg["project"]["sqlite_path"] = str(root / "results.sqlite")
+diff --git a/sinz_model/sqlite_snapshot.py b/sinz_model/sqlite_snapshot.py
+new file mode 100644
+index 0000000..d4f95db
+--- /dev/null
++++ b/sinz_model/sqlite_snapshot.py
+@@ -0,0 +1,46 @@
++"""SQLite-consistent, atomic snapshot helper (stdlib only; safe on PBS host)."""
++from __future__ import annotations
++
++import argparse
++import os
++import sqlite3
++import tempfile
++from contextlib import closing
++from pathlib import Path
++
++
++def sqlite_snapshot(source: Path, target: Path):
++    source, target = Path(source), Path(target)
++    if not source.is_file():
++        raise FileNotFoundError(f"Missing SQLite source: {source}")
++    if target.exists():
++        raise FileExistsError(f"Snapshot destination already exists: {target}")
++    target.parent.mkdir(parents=True, exist_ok=True)
++    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro",
++                                 uri=True, timeout=10)) as reader:
++        with closing(sqlite3.connect(str(target), timeout=10)) as writer:
++            reader.backup(writer)
++            if writer.execute("PRAGMA quick_check").fetchone()[0] != "ok":
++                raise RuntimeError(f"Snapshot failed SQLite integrity check: {source}")
++
++
++def atomic_snapshot(source: Path, destination: Path):
++    destination = Path(destination)
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix="tvsd-handoff-", dir=destination.parent) as folder:
++        pending = Path(folder) / "worker.sqlite"
++        sqlite_snapshot(Path(source), pending)
++        os.replace(pending, destination)
++    return destination
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--source", required=True)
++    parser.add_argument("--destination", required=True)
++    args = parser.parse_args()
++    print(atomic_snapshot(Path(args.source), Path(args.destination)))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/sinz_model/sweep.py b/sinz_model/sweep.py
+index b3d46a1..af83b2b 100644
+--- a/sinz_model/sweep.py
++++ b/sinz_model/sweep.py
+@@ -277,6 +277,8 @@ def run_plan(args) -> None:
+     reg.initialize()
+     parent = _resolve_parent(reg, str(root), args.workflow_id, args.parent_candidate_id)
+     base = reg.get_candidate_config(parent["candidate_id"])
++    if base.get("model", {}).get("family", "sinz") != "sinz":
++        raise NotImplementedError("SWEEP is SGD/Sinz-only; frozen ZWM uses launch/Optuna")
+     grid = _load_space(args.space)
+     plan = make_plan(base, grid, args.max_candidates)
+     n_members = int(base["training"]["ensemble_members"])
+@@ -306,6 +308,8 @@ def run_sweep(args) -> None:
+     parent = _resolve_parent(reg, str(root), args.workflow_id, args.parent_candidate_id)
+     workflow_id = str(parent["workflow_id"])
+     base = reg.get_candidate_config(parent["candidate_id"])
++    if base.get("model", {}).get("family", "sinz") != "sinz":
++        raise NotImplementedError("SWEEP is SGD/Sinz-only; frozen ZWM uses launch/Optuna")
+     grid = _load_space(args.space)
+     plan = make_plan(base, grid, args.max_candidates)
+ 
+diff --git a/sinz_model/trainer.py b/sinz_model/trainer.py
+index a7b1e99..94c1142 100644
+--- a/sinz_model/trainer.py
++++ b/sinz_model/trainer.py
+@@ -167,6 +167,20 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
+                  resume_run_id:Optional[str]=None,dry_run=False,limit_train_batches=None,
+                  limit_val_batches=None,evaluate_test=True,
+                  on_epoch_end:Optional[Callable[[int,float],bool]]=None)->str:
++    family = cfg.get("model", {}).get("family", "sinz")
++    strategy = cfg.get("training", {}).get("strategy", "gradient" if family == "sinz" else None)
++    if family == "transformer_neural":
++        if strategy != "frozen_ridge":
++            raise NotImplementedError(f"Unsupported transformer training strategy: {strategy!r}")
++        from .transformer_bridge import train_transformer_member
++        return train_transformer_member(
++            cfg, member_index, candidate_id, notes=notes, resume_run_id=resume_run_id,
++            dry_run=dry_run, limit_train_batches=limit_train_batches,
++            limit_val_batches=limit_val_batches, evaluate_test=evaluate_test,
++            on_epoch_end=on_epoch_end,
++        )
++    if family != "sinz" or strategy != "gradient":
++        raise NotImplementedError(f"Unsupported training combination: {family!r}/{strategy!r}")
+     member_index=int(member_index); seed=int(cfg["training"]["member_seeds"][member_index])
+     seeds=seed_everything(seed,cfg); dc=cfg["data"]
+     is_tvsd = dc.get("kind") == "tvsd"
+diff --git a/sinz_model/transformer_bridge.py b/sinz_model/transformer_bridge.py
+new file mode 100644
+index 0000000..1560ce8
+--- /dev/null
++++ b/sinz_model/transformer_bridge.py
+@@ -0,0 +1,87 @@
++"""Run the optional transformer strategy in its own Python runtime.
++
++Only JSON/files are exchanged across Python processes. There is no import of
++upstream ZWM, PyTorch 2.x or scikit-learn inside the Sinz interpreter.
++"""
++from __future__ import annotations
++import json
++import os
++import sys
++from pathlib import Path
++import subprocess
++import tempfile
++
++
++def _python(cfg):
++    binary = cfg.get('runtime',{}).get('python_executable')
++    if not binary:
++        raise ValueError('transformer_neural requires runtime.python_executable (ZWM Python 3.10 runtime)')
++    binary = Path(binary)
++    if not binary.is_file():
++        raise FileNotFoundError(f'Transformer Python interpreter not found: {binary}')
++    return str(binary)
++
++
++def _already_in_transformer_runtime(cfg):
++    """Do not launch a second Python when PBS selected the ZWM environment."""
++    return os.path.realpath(sys.executable) == os.path.realpath(_python(cfg))
++
++
++def train_transformer_member(cfg, member_index, candidate_id, *, notes=None,
++                             resume_run_id=None, dry_run=False,limit_train_batches=None,
++                             limit_val_batches=None,evaluate_test=False,on_epoch_end=None):
++    if notes is not None:
++        raise NotImplementedError('Transformers use frozen-ridge provenance in the run registry')
++    if dry_run or limit_train_batches is not None or limit_val_batches is not None:
++        raise NotImplementedError('Frozen ridge does not support partial TVSD training; use a small fixture')
++    if candidate_id is None:
++        raise ValueError('candidate_id is required')
++    if _already_in_transformer_runtime(cfg):
++        # In the ZWM PBS runtime use one interpreter/process for the full fit.
++        from transformer_model.train import train_ridge_member
++        run_id = train_ridge_member(cfg, member_index, candidate_id,
++                                    evaluate_test=evaluate_test, resume_run_id=resume_run_id)
++    else:
++        # Compatibility with an explicit Python 3.9 CLI invocation: invoke the
++        # *configured* Python 3.10 binary once, without importing ZWM here.
++        output=Path(cfg['project']['output_root']); output.mkdir(parents=True,exist_ok=True)
++        with tempfile.TemporaryDirectory(prefix='transformer-dispatch-',dir=output) as folder:
++            base=Path(folder)
++            config=base/'config.json'; result=base/'result.json'
++            config.write_text(json.dumps(cfg,sort_keys=True))
++            cmd=[_python(cfg),'-m','transformer_model.train','--config',str(config),
++                 '--candidate-id',str(candidate_id),'--member',str(member_index),
++                 '--result-file',str(result)]
++            if evaluate_test:
++                cmd.append('--evaluate-test')
++            if resume_run_id is not None:
++                cmd.extend(['--resume-run-id', str(resume_run_id)])
++            subprocess.run(cmd,check=True)
++            if not result.is_file():
++                raise RuntimeError('Transformer subprocess did not write run result')
++            run_id=json.loads(result.read_text())['run_id']
++    if on_epoch_end is not None:
++        from .orchestrator import RunRegistry
++        value=RunRegistry(cfg['project']['sqlite_path']).best_validation(run_id)
++        # Frozen ridge has no intermediate epoch pruning. The worker checks
++        # pruning=False; a callback's return cannot invalidate a completed run.
++        on_epoch_end(0,float(value['val_corr_mean']))
++    return str(run_id)
++
++
++def export_transformer_bundle(cfg, sqlite_path, candidate_id, destination):
++    with tempfile.TemporaryDirectory(prefix='transformer-export-') as folder:
++        result=Path(folder)/'exported.json'
++        subprocess.run([_python(cfg),'-m','transformer_model.export',
++                        '--sqlite-path',str(sqlite_path),'--candidate-id',str(candidate_id),
++                        '--destination',str(destination),'--result-file',str(result)],check=True)
++        return Path(json.loads(result.read_text())['destination'])
++
++
++def evaluate_transformer_run(cfg, sqlite_path, run_id):
++    with tempfile.TemporaryDirectory(prefix='transformer-eval-') as folder:
++        result=Path(folder)/'result.json'
++        subprocess.run([_python(cfg),'-m','transformer_model.evaluate',
++                        '--sqlite-path',str(sqlite_path),'--run-id',str(run_id),
++                        '--result-file',str(result)],check=True)
++        return json.loads(result.read_text())['summary']
+diff --git a/tests/test_lock_smoke.py b/tests/test_lock_smoke.py
+new file mode 100644
+index 0000000..d8e1e5e
+--- /dev/null
++++ b/tests/test_lock_smoke.py
+@@ -0,0 +1,106 @@
++"""Pure stdlib tests: no torch, Optuna, GPU, PBS daemon, or database server."""
++import os
++import socket
++import sqlite3
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++from sinz_model.owner_lock import break_owner_lock, owner_lock
++from sinz_model.sqlite_snapshot import atomic_snapshot
++
++
++BASE = Path(__file__).resolve().parents[1]
++
++
++class CoordinatorLockTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.lock = Path(self.temp.name) / 'project.coordinator.lock'
++
++    def test_live_process_cannot_be_unlocked(self):
++        with owner_lock(self.lock):
++            with self.assertRaisesRegex(RuntimeError, 'still alive'):
++                break_owner_lock(self.lock)
++        self.assertFalse(self.lock.exists())
++
++    def test_dead_local_pid_can_be_unlocked(self):
++        self.lock.mkdir()
++        (self.lock / 'owner').write_text(f'host={socket.gethostname()} pid=999999999\n')
++        with patch('sinz_model.owner_lock.os.kill', side_effect=ProcessLookupError):
++            break_owner_lock(self.lock)
++        self.assertFalse(self.lock.exists())
++
++    def test_reject_foreign_invalid_and_inaccessible_owners(self):
++        for record in ('host=another-host pid=123\n', 'host=local pid=0\n', 'broken'):
++            self.lock.mkdir()
++            (self.lock / 'owner').write_text(record)
++            with patch('sinz_model.owner_lock.os.kill') as kill:
++                with self.assertRaises(RuntimeError):
++                    break_owner_lock(self.lock)
++                kill.assert_not_called()
++            self.assertTrue(self.lock.exists())
++            (self.lock / 'owner').unlink()
++            self.lock.rmdir()
++        self.lock.mkdir()
++        (self.lock / 'owner').write_text(f'host={socket.gethostname()} pid=123\n')
++        with patch('sinz_model.owner_lock.os.kill', side_effect=PermissionError):
++            with self.assertRaisesRegex(RuntimeError, 'Cannot verify'):
++                break_owner_lock(self.lock)
++        self.assertTrue(self.lock.exists())
++
++    def test_sqlite_snapshot_replaces_atomically(self):
++        source = Path(self.temp.name) / 'source.sqlite'
++        dest = Path(self.temp.name) / 'snapshot.sqlite'
++        with sqlite3.connect(source) as db:
++            db.execute('CREATE TABLE t (i INTEGER)')
++            db.execute('INSERT INTO t VALUES (1)')
++        atomic_snapshot(source, dest)
++        with sqlite3.connect(source) as db:
++            db.execute('UPDATE t SET i=2')
++        atomic_snapshot(source, dest)
++        with sqlite3.connect(dest) as db:
++            self.assertEqual(db.execute('SELECT i FROM t').fetchone()[0], 2)
++
++
++class PBSLockTests(unittest.TestCase):
++    def _run(self, state):
++        with tempfile.TemporaryDirectory() as temp:
++            directory = Path(temp)
++            (directory / '.worker-running').write_text('job=111.pbs-m1.metacentrum.cz\n')
++            bin_dir = directory / 'bin'
++            bin_dir.mkdir()
++            stub = bin_dir / 'qstat'
++            stub.write_text('#!/bin/sh\n'
++                            '[ "$1" = -x ] && [ "$2" = -f ] || exit 98\n'
++                            'printf "    job_state = %s\\n" "$MOCK_QSTATE"\n')
++            stub.chmod(0o700)
++            script = (BASE / 'jobs' / 'optuna_trial.pbs').read_text()
++            block = 'LOCK="$TRIAL_DIR/.worker-running"' + script.split(
++                'LOCK="$TRIAL_DIR/.worker-running"', 1)[1].split(
++                    '\nexport SINGULARITYENV_PYTHONPATH=', 1)[0]
++            env = dict(os.environ, TRIAL_DIR=str(directory),
++                       PBS_JOBID='222.pbs-m1.metacentrum.cz', MOCK_QSTATE=state,
++                       PATH=str(bin_dir) + os.pathsep + os.environ['PATH'])
++            result = subprocess.run(['bash', '-c', 'set -euo pipefail\n' + block],
++                                    env=env, capture_output=True, text=True)
++            return result, (directory / '.worker-running').exists()
++
++    def test_finished_job_states_release_stale_lock(self):
++        for state in ('F', 'X'):
++            with self.subTest(state=state):
++                result, left = self._run(state)
++                self.assertEqual(result.returncode, 0, result.stderr)
++                self.assertFalse(left)
++
++    def test_running_job_is_never_stolen(self):
++        result, left = self._run('R')
++        self.assertEqual(result.returncode, 5, result.stderr)
++        self.assertTrue(left)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_optuna_batch.py b/tests/test_optuna_batch.py
+index 82239ae..a620f09 100644
+--- a/tests/test_optuna_batch.py
++++ b/tests/test_optuna_batch.py
+@@ -10,6 +10,7 @@ from pathlib import Path
+ import optuna
+ from sinz_model import optuna_batch as ob
+ from sinz_model.orchestrator import RunRegistry
++from sinz_model.owner_lock import break_owner_lock
+ 
+ BASE = Path(__file__).resolve().parents[1]
+ 
+@@ -34,6 +35,19 @@ class BatchTest(unittest.TestCase):
+         ob.prepare(argparse.Namespace(root=str(self.root), trials=n, data_root=None, image_root=None))
+         return ob._read(ob._active(self.root))
+ 
++    def test_study_lock_refuses_live_owner_and_is_recoverable_when_dead(self):
++        from unittest.mock import patch
++        with ob._lock(self.root):
++            with self.assertRaisesRegex(RuntimeError, 'still alive'):
++                break_owner_lock(self.root / '.coordinator.lock')
++        lock = self.root / '.coordinator.lock'
++        lock.mkdir()
++        import socket
++        (lock / 'owner').write_text(f'host={socket.gethostname()} pid=999999999\n')
++        with patch('sinz_model.owner_lock.os.kill', side_effect=ProcessLookupError):
++            ob.break_study_lock(argparse.Namespace(root=str(self.root)))
++        self.assertFalse(lock.exists())
++
+     def result(self, record, scores=(0.15, 0.3), status='completed'):
+         trial_dir = Path(record['trial_dir'])
+         worker_db = trial_dir / 'worker_result.sqlite'
+@@ -134,7 +148,8 @@ class BatchTest(unittest.TestCase):
+         with patch('sinz_model.optuna_batch.subprocess.run', side_effect=[
+             Job('123[].pbs-m1.metacentrum.cz\n'), Job('124.pbs-m1.metacentrum.cz\n'),
+         ]) as qsub:
+-            ob.submit(argparse.Namespace(root=str(self.root), concurrency=4, dry_run=False))
++            ob.submit(argparse.Namespace(root=str(self.root), concurrency=4,
++                                         dry_run=False,execute=True,schedule_collector=True))
+         self.assertEqual(qsub.call_count, 2)
+         arr = qsub.call_args_list[0].args[0]
+         collect = qsub.call_args_list[1].args[0]
+@@ -144,6 +159,21 @@ class BatchTest(unittest.TestCase):
+         self.assertEqual(manifest['collector_job_id'], '124.pbs-m1.metacentrum.cz')
+         self.assertFalse(manifest['submission_pending'])
+ 
++    def test_submit_previews_by_default_and_requires_explicit_scheduler_opt_in(self):
++        from unittest.mock import patch
++        self.prepare(4)
++        with patch('sinz_model.optuna_batch.subprocess.run') as qsub:
++            ob.submit(argparse.Namespace(root=str(self.root), concurrency=4,dry_run=False))
++            qsub.assert_not_called()
++        self.assertIsNone(ob._read(ob._active(self.root))['array_job_id'])
++        class Job:
++            stdout='125[].pbs-m1.metacentrum.cz\n'
++        with patch('sinz_model.optuna_batch.subprocess.run',return_value=Job()) as qsub:
++            ob.submit(argparse.Namespace(root=str(self.root), concurrency=2,
++                                         dry_run=False,execute=True,schedule_collector=False))
++            self.assertEqual(qsub.call_count,1)  # Only the GPU array, no extra PBS node.
++        self.assertIsNone(ob._read(ob._active(self.root))['collector_job_id'])
++
+     def test_invalid_search_and_submission_dry_run(self):
+         batch = self.prepare(2)
+         for key in ('data.root', 'project.output_root', 'training.member_seeds', 'unknown'):
+@@ -155,3 +185,35 @@ class BatchTest(unittest.TestCase):
+ 
+ if __name__ == '__main__':
+     unittest.main()
++
++
++def test_frozen_ridge_optuna_prepare_uses_single_registry(tmp_path):
++    from sinz_model import optuna_batch as ob
++    import argparse, json, yaml
++    root = tmp_path / 'optuna' / 'ridge'
++    repo = Path(__file__).resolve().parents[1]
++    space = tmp_path / 'ridge_space.yaml'
++    space.write_text(yaml.safe_dump({'search': {'model.backbone.layer': {
++        'type': 'choice', 'values': ['transformer.h.20', 'transformer.h.22']}}}))
++    params = dict(root=str(root), project_db=None,
++        config=str(repo / 'configs/tvsd_zwm_ridge.yaml'), space=str(space),
++        name='ridge-test', seed=8, member_seed=8000, epochs=None, phase1_epochs=None,
++        train_batches=None, val_batches=None, prune=False,
++        pruner_startup_trials=2, pruner_warmup_steps=0)
++    ob.initialize(argparse.Namespace(**params))
++    meta = ob._read(root / 'experiment.json')
++    assert Path(meta['project_db']) == tmp_path / 'results' / 'results.sqlite'
++    ob.prepare(argparse.Namespace(root=str(root), trials=2, data_root=None, image_root=None))
++    manifest = ob._read(ob._active(root))
++    assert len(manifest['records']) == 2
++    configs = [ob._read(Path(record['trial_dir']) / 'config.json')
++               for record in manifest['records']]
++    assert all(cfg['training']['strategy'] == 'frozen_ridge' for cfg in configs)
++    assert all('total_epochs' not in cfg['training'] for cfg in configs)
++    assert all(cfg['project']['sqlite_path'] == '/worker/worker.sqlite' for cfg in configs)
++    for key, val in (('prune', True), ('train_batches', 2), ('epochs', 2)):
++        bad = dict(params)
++        bad['root'] = str(tmp_path / 'optuna' / ('bad_' + key))
++        bad[key] = val
++        with __import__('pytest').raises(ValueError):
++            ob.initialize(argparse.Namespace(**bad))
+diff --git a/tests/test_optuna_worker.py b/tests/test_optuna_worker.py
+index edadf52..fc3e582 100644
+--- a/tests/test_optuna_worker.py
++++ b/tests/test_optuna_worker.py
+@@ -6,6 +6,7 @@ import unittest
+ from pathlib import Path
+ from unittest.mock import patch
+ from sinz_model.optuna_worker import fix_cuda_visible_devices, execute, _digest
++from sinz_model.orchestrator import RunRegistry
+ 
+ 
+ class WorkerTest(unittest.TestCase):
+@@ -41,3 +42,59 @@ class WorkerTest(unittest.TestCase):
+ 
+ if __name__ == '__main__':
+     unittest.main()
++
++
++def test_frozen_ridge_retry_uses_existing_run_without_sgd_checkpoint(tmp_path):
++    """Worker orchestration keeps ridge run identity; SGD resume remains separate."""
++    from sinz_model import optuna_worker
++    root=tmp_path/'experiment'
++    trial_dir=root/'trials'/'trial-00007'
++    batch_dir=root/'batches'/'batch-001'
++    trial_dir.mkdir(parents=True)
++    batch_dir.mkdir(parents=True)
++    worker_db=tmp_path/'worker.sqlite'
++    cfg={'model':{'family':'transformer_neural'},
++         'training':{'strategy':'frozen_ridge'},
++         'project':{'sqlite_path':str(worker_db),'output_root':str(tmp_path/'runs')}}
++    (trial_dir/'config.json').write_text(json.dumps(cfg))
++    (batch_dir/'manifest.json').write_text(json.dumps({'records':[{
++        'index':1,'number':7,'params':{},'trial_dir':str(trial_dir),
++        'container_trial_dir':str(trial_dir),'config_sha256':_digest(cfg)}]}))
++    (root/'experiment.json').write_text(json.dumps({
++        'name':'test-ridge','prune':False,'train_batches':None,'val_batches':None}))
++    registry=RunRegistry(str(worker_db)); registry.initialize()
++    workflow=registry.create_workflow('optuna:test-ridge:trial:7')
++    candidate=registry.create_candidate(workflow,'optuna',cfg,overrides={})['candidate_id']
++    run=registry.start_run(candidate,0,'test',{'root':8000},'dataset','split',[],cfg=cfg)
++    registry.finish_run(run['run_id'],'failed',error='PBS preemption')
++    assert not (Path(run['run_dir'])/'checkpoints/latest.pt').exists()
++    called=[]
++    def fake_train(resolved,member,*,candidate_id,resume_run_id,**kwargs):
++        called.append((candidate_id,resume_run_id))
++        assert resolved['training']['strategy']=='frozen_ridge'
++        registry.mark_running(resume_run_id)
++        registry.log_epoch(resume_run_id,0,'frozen_ridge',float('nan'),
++                           float('nan'),.4,.3,0.)
++        registry.finish_run(resume_run_id,'completed')
++        return resume_run_id
++    class Trial:
++        def report(self,value,step): pass
++        def should_prune(self): return False
++    with patch.object(optuna_worker,'fix_cuda_visible_devices'), \
++         patch.object(optuna_worker,'pruning_trial',return_value=(None,Trial())), \
++         patch('torch.cuda.is_available',return_value=True), \
++         patch('torch.cuda.device_count',return_value=1), \
++         patch('torch.cuda.get_device_name',return_value='fake GPU'), \
++         patch('sinz_model.trainer.train_member',side_effect=fake_train):
++        execute(root,'batch-001',1,worker_db)
++    assert called==[(candidate,run['run_id'])]
++    assert len(registry.candidate_runs(candidate))==1
++    result=json.loads((trial_dir/'result.json').read_text())
++    assert result['status']=='completed' and result['run_id']==run['run_id']
++    assert result['intermediate_values']=={'0':.4}
++
++
++def test_retry_pbs_uses_latest_worker_database():
++    script=(Path(__file__).resolve().parents[1]/'jobs/optuna_trial.pbs').read_text()
++    assert 'SOURCE_DB="$TRIAL_DIR/worker_result.sqlite"' in script
++    assert 'cp "$SOURCE_DB" "$SCRATCHDIR/worker.sqlite"' in script
+diff --git a/tests/test_registry_handoff.py b/tests/test_registry_handoff.py
+new file mode 100644
+index 0000000..e9217a3
+--- /dev/null
++++ b/tests/test_registry_handoff.py
+@@ -0,0 +1,102 @@
++"""Single-writer worker-to-project handoff, without Optuna or a PBS node."""
++import sqlite3
++import socket
++from pathlib import Path
++
++import pytest
++
++from sinz_model.orchestrator import RunRegistry
++from sinz_model.registry_handoff import break_lock, collect, project_writer_lock
++from sinz_model.sqlite_snapshot import atomic_snapshot
++
++
++def _central(tmp_path):
++    central = tmp_path / 'results' / 'results.sqlite'
++    reg = RunRegistry(str(central))
++    reg.initialize()
++    wf = reg.create_workflow('manual-zwm')
++    cfg = {'project': {'sqlite_path': str(central),
++                       'output_root': str(tmp_path/'outputs')},
++           'model': {'family': 'transformer_neural'},
++           'training': {'strategy': 'frozen_ridge'}}
++    candidate = reg.create_candidate(wf, 'manual', cfg)['candidate_id']
++    return central, reg, candidate, cfg
++
++
++def test_worker_snapshot_collects_one_run_and_is_idempotent(tmp_path):
++    central, project, candidate, cfg = _central(tmp_path)
++    worker = tmp_path/'worker.sqlite'
++    atomic_snapshot(central, worker)
++    isolated = RunRegistry(str(worker))
++    cfg['project']['sqlite_path'] = str(worker)
++    run = isolated.start_run(candidate,0,'training',{'root':8000},'data','split',[],cfg=cfg)
++    isolated.log_epoch(run['run_id'],0,'frozen_ridge',float('nan'),float('nan'),.5,.4,0.)
++    isolated.finish_run(run['run_id'],'completed')
++    assert project.candidate_runs(candidate)==[]  # No compute-node central writes.
++    assert collect(central,worker,candidate)==run['run_id']
++    assert project.get_run(run['run_id'])['status']=='completed'
++    assert project.best_validation(run['run_id'])['val_corr_mean']==.5
++    assert collect(central,worker,candidate)==run['run_id']
++    assert len(project.candidate_runs(candidate))==1
++
++
++def test_collected_failed_run_can_be_retried_without_duplicate_run(tmp_path):
++    central, project, candidate, cfg = _central(tmp_path)
++    worker=tmp_path/'worker.sqlite'
++    atomic_snapshot(central,worker)
++    isolated=RunRegistry(str(worker))
++    cfg['project']['sqlite_path']=str(worker)
++    run=isolated.start_run(candidate,0,'training',{'root':8000},'data','split',[],cfg=cfg)
++    isolated.finish_run(run['run_id'],'failed',error='simulated walltime')
++    collect(central,worker,candidate)
++    assert project.get_run(run['run_id'])['status']=='failed'
++    isolated.mark_running(run['run_id'])
++    isolated.log_epoch(run['run_id'],0,'frozen_ridge',float('nan'),float('nan'),.5,.4,0.)
++    isolated.finish_run(run['run_id'],'completed')
++    collect(central,worker,candidate)
++    assert project.get_run(run['run_id'])['status']=='completed'
++    assert len(project.candidate_runs(candidate))==1
++
++
++def test_handoff_rejects_other_candidate_or_active_coordinator(tmp_path):
++    central,_,candidate,_ = _central(tmp_path)
++    worker=tmp_path/'worker.sqlite'
++    atomic_snapshot(central,worker)
++    with pytest.raises(ValueError,match='exactly one'):
++        collect(central,worker,candidate)
++    with project_writer_lock(central):
++        with pytest.raises(RuntimeError,match='already active'):
++            collect(central,worker,candidate)
++
++
++def test_sqlite_snapshot_contains_committed_rows(tmp_path):
++    source=tmp_path/'source.sqlite'
++    with sqlite3.connect(source) as con:
++        con.execute('CREATE TABLE t (i INTEGER)')
++        con.execute('INSERT INTO t VALUES (7)')
++    target=tmp_path/'snapshot.sqlite'
++    atomic_snapshot(source,target)
++    with sqlite3.connect(target) as con:
++        assert con.execute('SELECT i FROM t').fetchone()[0]==7
++
++
++def test_break_lock_rejects_running_owner(tmp_path):
++    central = tmp_path/'project.sqlite'
++    with project_writer_lock(central):
++        with pytest.raises(RuntimeError, match='still alive'):
++            break_lock(central)
++    assert not Path(str(central.resolve()) + '.coordinator.lock').exists()
++
++
++def test_break_lock_only_removes_confirmed_dead_local_owner(tmp_path, monkeypatch):
++    central = tmp_path/'project.sqlite'
++    lock = Path(str(central.resolve()) + '.coordinator.lock')
++    lock.mkdir()
++    (lock/'owner').write_text(f'host={socket.gethostname()} pid=999999999\n')
++
++    def dead(_pid, _signal):
++        raise ProcessLookupError('no such process')
++
++    monkeypatch.setattr('sinz_model.owner_lock.os.kill', dead)
++    assert break_lock(central) == lock
++    assert not lock.exists()
+diff --git a/tests/test_transformer_model.py b/tests/test_transformer_model.py
+new file mode 100644
+index 0000000..ddf734e
+--- /dev/null
++++ b/tests/test_transformer_model.py
+@@ -0,0 +1,104 @@
++import numpy as np
++import torch
++from torch import nn
++from transformer_model import fit_masked_ridge_cv, TransformerNeuralModel
++from transformer_model.ridge import fit_masked_ridge_cv_reference
++from transformer_model.model import export_model, load_export
++
++class ToyBackbone(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.layer = nn.Linear(3, 6)
++    def forward(self, x):
++        return self.layer(x)
++
++def _forward(backbone, image):
++    return backbone(image)
++
++def test_masked_ridge_and_export(tmp_path):
++    rng = np.random.default_rng(41)
++    X = rng.normal(size=(50, 3)).astype(np.float32)
++    Y = X @ np.array([[1., -2.], [0.4, 0.2], [-0.5, 1.5]]) + 0.2
++    mask = np.ones_like(Y, bool)
++    mask[::3, 1] = False
++    fit = fit_masked_ridge_cv(X, Y, mask, train_indices=np.arange(40), groups=np.arange(50), cv_folds=4)
++    pred = fit.readout(torch.from_numpy(X)).detach().numpy()
++    assert pred.shape == (50,2)
++    assert np.all(np.isfinite(pred))
++    assert fit.valid_train_counts.tolist() == [40, 26]
++    assert fit.valid_neuron_mask.tolist() == [True, True]
++    assert np.corrcoef(pred[:40,0], Y[:40,0])[0,1] > .99
++    bb = ToyBackbone()
++    feat = bb(torch.from_numpy(X)).detach().numpy()
++    fit2 = fit_masked_ridge_cv(feat, Y, mask, train_indices=np.arange(40), groups=np.arange(50), cv_folds=4)
++    model = TransformerNeuralModel(bb, fit2.readout, forward_image=_forward, layer='layer')
++    before = model.predict(torch.from_numpy(X[:5])).clone()
++    export_model(model, tmp_path, metadata={'backbone':'toy', 'neuron_ids':['a','b']})
++    model.close()
++    loaded, manifest = load_export(tmp_path, build_backbone=lambda config: ToyBackbone(), forward_image=_forward)
++    torch.testing.assert_close(before, loaded.predict(torch.from_numpy(X[:5])), atol=1e-6, rtol=1e-6)
++    assert manifest['neuron_ids']==['a','b']
++    loaded.close()
++
++def test_no_response_leakage():
++    rng = np.random.default_rng(0)
++    X = rng.normal(size=(24,4))
++    Y = rng.normal(size=(24,1))
++    m = np.ones_like(Y, dtype=bool)
++    a = fit_masked_ridge_cv(X,Y,m,train_indices=np.arange(18), groups=np.arange(24))
++    Y[18:] = 1000000
++    b = fit_masked_ridge_cv(X,Y,m,train_indices=np.arange(18), groups=np.arange(24))
++    torch.testing.assert_close(a.readout.weight, b.readout.weight)
++
++
++def test_unfitted_neuron_has_explicit_mask():
++    rng=np.random.default_rng(21)
++    x=rng.normal(size=(12,3))
++    y=rng.normal(size=(12,2))
++    mask=np.ones_like(y,dtype=bool)
++    mask[:,1]=False
++    mask[:2,1]=True  # Too few observations for grouped CV.
++    fit=fit_masked_ridge_cv(x,y,mask,train_indices=np.arange(10),groups=np.arange(12))
++    assert fit.valid_train_counts.tolist()==[10,2]
++    assert fit.valid_neuron_mask.tolist()==[True,False]
++    assert torch.isnan(fit.readout.bias[1])
++
++
++def test_fast_ridge_matches_reference_with_shared_masks_and_grouped_images():
++    rng=np.random.default_rng(11)
++    x=rng.normal(size=(42,9))
++    y=x @ rng.normal(size=(9,5)) + rng.normal(scale=.05,size=(42,5))
++    mask=np.ones_like(y,dtype=bool)
++    mask[::7,:2]=False
++    mask[::5,2:4]=False
++    mask[:,4]=False
++    mask[:2,4]=True  # Unfittable neuron in both implementations
++    tr=np.arange(34)
++    # Each image has multiple presentations; no fold may split its repeats.
++    groups=np.repeat(np.arange(21),2)
++    options={'train_indices':tr,'groups':groups,'alphas':(.01,.1,1.,10.),
++             'cv_folds':3}
++    slow=fit_masked_ridge_cv_reference(x,y,mask,**options)
++    fast=fit_masked_ridge_cv(x,y,mask,**options)
++    np.testing.assert_array_equal(fast.valid_neuron_mask,slow.valid_neuron_mask)
++    np.testing.assert_allclose(fast.alphas,slow.alphas,equal_nan=True)
++    np.testing.assert_allclose(fast.cv_scores,slow.cv_scores,rtol=1e-5,atol=1e-6,equal_nan=True)
++    torch.testing.assert_close(fast.readout.weight,slow.readout.weight,rtol=1e-4,atol=1e-4)
++    torch.testing.assert_close(fast.readout.bias[:4],slow.readout.bias[:4],rtol=1e-4,atol=1e-4)
++
++
++def test_shared_masks_use_one_decomposition_per_fold(monkeypatch):
++    rng=np.random.default_rng(12)
++    x=rng.normal(size=(30,6))
++    y=x @ rng.normal(size=(6,7))
++    mask=np.ones_like(y,dtype=bool)
++    eig=np.linalg.eigh
++    calls=[]
++    def tracked(matrix):
++        calls.append(matrix.shape)
++        return eig(matrix)
++    monkeypatch.setattr(np.linalg,'eigh',tracked)
++    fit=fit_masked_ridge_cv(x,y,mask,train_indices=np.arange(24),
++                            groups=np.arange(30),cv_folds=3)
++    assert fit.valid_neuron_mask.all()
++    assert len(calls)==4  # Three folds + one final refit, for all seven outputs.
+diff --git a/tests/test_transformer_pipeline.py b/tests/test_transformer_pipeline.py
+new file mode 100644
+index 0000000..02dfa86
+--- /dev/null
++++ b/tests/test_transformer_pipeline.py
+@@ -0,0 +1,276 @@
++"""Synthetic contract tests: TVSD rows -> ridge -> shared registry -> export.
++
++These tests do NOT claim that a released ZWM checkpoint has been executed.
++"""
++import json
++from pathlib import Path
++from types import SimpleNamespace
++
++import numpy as np
++import pandas as pd
++from PIL import Image
++import pytest
++import torch
++
++from sinz_model.orchestrator import RunRegistry
++from transformer_model import train as train_module
++from transformer_model.model import export_zwm_bundle, load_zwm_bundle
++
++
++class FakeExtractor:
++    def __init__(self):
++        self.calls=0
++        self.closed=False
++    def extract(self, frame):
++        self.calls+=1
++        p=np.asarray(frame, dtype=float)[...,0].mean()/255.
++        return np.array([[p, p*p, p*p*p]],dtype=np.float32)
++    def close(self):
++        self.closed=True
++
++
++def _synthetic_ridge_fixture(tmp_path, monkeypatch, *, chunk_size=256,
++                             solver='spectral'):
++    dataset=tmp_path/'dataset'; dataset.mkdir()
++    images=tmp_path/'images'; images.mkdir()
++    upstream=tmp_path/'ZWM'; chk=upstream/'out'/'awwkl'/'test'/'model.pt'
++    chk.parent.mkdir(parents=True); chk.write_bytes(b'fake-upstream-checkpoint')
++    rows=[]
++    y=[]
++    for k in range(16):
++        pixel=25+k*12
++        Image.new('RGB',(12,12),(pixel,pixel,pixel)).save(images/f'{k}.png')
++        rows.append({'stimulus_id':f'train:{k}','image_relative_path':f'{k}.png',
++                     'partition':'train' if k<12 else 'val'})
++        x=pixel/255.
++        y.append([0.5+2*x,1.-x])
++    df=pd.DataFrame(rows)
++    # The F/N columns are still disjoint in the shared two-neuron axis.
++    (dataset/'neuron_index.csv').write_text('animal,neuron_index,neuron_id\nF,0,F/0\nN,0,N/0\n')
++    table=SimpleNamespace(rows=df,responses=np.asarray(y,dtype=np.float32),
++                          mask=np.ones((len(df),2),dtype=bool))
++    bundle=SimpleNamespace(widths={'F':1,'N':1},full=table,
++            mapping=[{'animal':'F','session_id':'F1'},{'animal':'N','session_id':'N1'}],
++            fingerprint='synthetic-fingerprint',split=SimpleNamespace(sha256='synthetic-split'))
++    monkeypatch.setattr(train_module,'TVSDTrainingBundle',lambda cfg:bundle)
++    root=tmp_path/'run'
++    cfg={'model':{'family':'transformer_neural',
++                  'backbone':{'kind':'zwm','repo_root':str(upstream),
++                              'model_ref':'awwkl/test/model.pt','layer':'transformer.h.22',
++                              'input_mode':'grayscale_rgb','pooling':'mean',
++                              'cache_chunk_size':chunk_size},
++                  'readout':{'outdims':2,'outdims_by_animal':{'F':1,'N':1}}},
++         'project':{'output_root':str(root),'sqlite_path':str(root/'results.sqlite'),
++                    'feature_cache_root':str(root/'cache')},
++         'data':{'kind':'tvsd','root':str(dataset),'image_root':str(images)},
++         'training':{'strategy':'frozen_ridge','ensemble_members':1,'member_seeds':[8000],'seed':8000},
++         'ridge':{'alphas':[0.001,0.01,0.1], 'cv_folds':2, 'solver':solver}}
++    registry=RunRegistry(cfg['project']['sqlite_path']); registry.initialize()
++    wf=registry.create_workflow('synthetic-zwm')
++    candidate=registry.create_candidate(wf,'search',cfg)['candidate_id']
++    return cfg,registry,candidate,chk
++
++
++def test_frozen_ridge_is_registered_and_exportable(tmp_path,monkeypatch):
++    cfg,registry,candidate,chk=_synthetic_ridge_fixture(tmp_path,monkeypatch)
++    fake=FakeExtractor()
++    run_id=train_module.train_ridge_member(cfg,0,candidate,extractor=fake)
++    assert fake.calls==16 and fake.closed
++    assert registry.get_run(run_id)['status']=='completed'
++    assert registry.best_validation(run_id)['val_corr_mean']>.95
++    assert registry.best_checkpoint(run_id).endswith('best.pt')
++    with registry.connect() as con:
++        assert con.execute('SELECT COUNT(*) FROM epochs WHERE run_id=?',(run_id,)).fetchone()[0]==1
++        assert con.execute('SELECT COUNT(*) FROM metrics WHERE run_id=? AND split=?',(run_id,'val')).fetchone()[0]==4
++    bundle_dir=export_zwm_bundle(registry.sqlite_path,candidate, tmp_path/'export')
++    manifest=json.loads((bundle_dir/'manifest.json').read_text())
++    assert manifest['neuron_ids']==['F/0','N/0']
++    assert manifest['valid_neuron_mask']==[True,True]
++    assert manifest['run_id']==run_id
++    assert (bundle_dir/'model.pt').read_bytes()==chk.read_bytes()
++    assert 'readout_state.pt' in {p.name for p in bundle_dir.iterdir()}
++    state=torch.load(bundle_dir/'readout_state.pt',weights_only=True)
++    assert state['weight'].shape==(2,3)
++    assert state['neuron_ids']==manifest['neuron_ids']
++    assert state['valid_neuron_mask'].tolist()==manifest['valid_neuron_mask']
++    from transformer_model import backbones
++    class StubZWM(FakeExtractor):
++        def __init__(self,*args,**kwargs): super().__init__()
++    monkeypatch.setattr(backbones,'ZWMFeatures',StubZWM)
++    loaded=load_zwm_bundle(bundle_dir,zwm_repo_root=tmp_path/'ZWM',
++                           expected_neuron_ids=['F/0','N/0'])
++    assert loaded.predict(Image.new('RGB',(8,8),(100,)*3)).shape==(1,2)
++    loaded.close()
++    with pytest.raises(ValueError,match='expected dataset'):
++        load_zwm_bundle(bundle_dir,zwm_repo_root=tmp_path/'ZWM',
++                        expected_neuron_ids=['N/0','F/0'])
++    (bundle_dir/'manifest.json').write_text(json.dumps({**manifest,'neuron_ids':['N/0','F/0']}))
++    with pytest.raises(ValueError,match='identities/order'):
++        load_zwm_bundle(bundle_dir,zwm_repo_root=tmp_path/'ZWM')
++    with pytest.raises(FileExistsError):
++        export_zwm_bundle(registry.sqlite_path,candidate,tmp_path/'export')
++
++
++def test_frozen_ridge_retry_preserves_run_and_reuses_features(tmp_path,monkeypatch):
++    cfg,registry,candidate,_=_synthetic_ridge_fixture(tmp_path,monkeypatch,chunk_size=1)
++    class Preempted(FakeExtractor):
++        def extract(self,frame):
++            if self.calls:
++                raise RuntimeError('simulated PBS preemption')
++            return super().extract(frame)
++    first=Preempted()
++    with pytest.raises(RuntimeError,match='simulated PBS preemption'):
++        train_module.train_ridge_member(cfg,0,candidate,extractor=first)
++    original=registry.candidate_runs(candidate)[0]
++    assert original['status']=='failed'
++    assert first.calls==1 and first.closed
++    second=FakeExtractor()
++    same_run=train_module.train_ridge_member(cfg,0,candidate,
++                                             extractor=second,resume_run_id=original['run_id'])
++    assert same_run==original['run_id']
++    assert len(registry.candidate_runs(candidate))==1
++    assert second.calls==15 and second.closed
++    assert registry.get_run(same_run)['status']=='completed'
++    assert registry.get_run(same_run)['created_at_utc']==original['created_at_utc']
++    history=json.loads((Path(original['run_dir'])/'ridge_retry_history.json').read_text())
++    assert len(history)==1 and history[0]['previous_status']=='failed'
++    assert 'simulated PBS preemption' in history[0]['previous_error']
++    with registry.connect() as con:
++        assert con.execute('SELECT COUNT(*) FROM epochs WHERE run_id=?',(same_run,)).fetchone()[0]==1
++        assert con.execute('SELECT COUNT(*) FROM checkpoints WHERE run_id=?',(same_run,)).fetchone()[0]==1
++    with pytest.raises(ValueError,match='incomplete'):
++        train_module.train_ridge_member(cfg,0,candidate,extractor=FakeExtractor(),resume_run_id=same_run)
++
++
++def test_reference_ridge_solver_uses_same_project_registry(tmp_path,monkeypatch):
++    cfg,registry,candidate,_=_synthetic_ridge_fixture(
++        tmp_path,monkeypatch,solver='sklearn_reference')
++    run_id=train_module.train_ridge_member(cfg,0,candidate,extractor=FakeExtractor())
++    assert registry.get_run(run_id)['status']=='completed'
++    assert registry.best_validation(run_id)['val_corr_mean']>.95
++
++
++def test_export_rejects_changed_neuron_identity(tmp_path,monkeypatch):
++    cfg,registry,candidate,_=_synthetic_ridge_fixture(tmp_path,monkeypatch)
++    run_id=train_module.train_ridge_member(cfg,0,candidate,extractor=FakeExtractor())
++    (Path(cfg['data']['root'])/'neuron_index.csv').write_text(
++        'animal,neuron_index,neuron_id\nF,0,F/changed\nN,0,N/0\n')
++    with pytest.raises(ValueError,match='checkpoint neuron order'):
++        export_zwm_bundle(registry.sqlite_path,candidate,tmp_path/'export')
++    from transformer_model import evaluate as eval_module
++    monkeypatch.setattr(eval_module,'TVSDTrainingBundle',train_module.TVSDTrainingBundle)
++    with pytest.raises(ValueError,match='Readout neuron order'):
++        eval_module.evaluate_ridge_run(registry.sqlite_path,run_id)
++
++
++def test_feature_cache_invalidates_when_inputs_change(tmp_path):
++    root=tmp_path/'images'; root.mkdir()
++    Image.new('RGB',(2,2),(70,70,70)).save(root/'a.png')
++    upstream=tmp_path/'ZWM'; checkpoint=upstream/'out'/'test.pt'
++    checkpoint.parent.mkdir(parents=True); checkpoint.write_text('source')
++    cfg={'model':{'backbone':{'model_ref':'test.pt','repo_root':str(upstream),
++                   'layer':'x','pooling':'mean','input_mode':'grayscale_rgb'}},
++         'data':{'image_root':str(root)}}
++    fake=FakeExtractor()
++    idx={'train:1':'a.png'}
++    lookup,path=train_module.extract_cached_features(idx,cfg,tmp_path/'cache',fake)
++    assert fake.calls==1
++    lookup2,path2=train_module.extract_cached_features(idx,cfg,tmp_path/'cache',None)
++    assert path==path2 and np.allclose(lookup['train:1'],lookup2['train:1'])
++    checkpoint.write_text('changed')
++    with pytest.raises(ValueError,match='required'):
++        train_module.extract_cached_features(idx,cfg,tmp_path/'cache',None)
++
++
++def test_upstream_adapter_calls_single_image_forward_and_hooks(tmp_path, monkeypatch):
++    """Contract test for external ZWMPredictor, without a real downloaded model."""
++    import sys
++    import types
++    from transformer_model.backbones import ZWMFeatures
++
++    checkpoint=tmp_path/'out'/'stub.pt'
++    checkpoint.parent.mkdir(parents=True)
++    checkpoint.write_bytes(b'pretend-weights')
++    class Backbone(torch.nn.Module):
++        def __init__(self):
++            super().__init__()
++            self.transformer=torch.nn.Module()
++            self.transformer.h=torch.nn.ModuleList([torch.nn.Identity() for _ in range(23)])
++        def forward(self,x):
++            return self.transformer.h[22](x)
++    class Predictor:
++        def __init__(self, checkpoint_name):
++            assert checkpoint_name=='stub.pt'
++            self.model=Backbone()
++            self.calls=0
++        def single_image_forward(self, image, frame_gap):
++            assert frame_gap==-1
++            assert isinstance(image,Image.Image)
++            self.calls+=1
++            self.model(torch.ones(1,4,3))
++    parent=types.ModuleType('zwm'); parent.__path__=[]
++    sub=types.ModuleType('zwm.zwm_predictor'); sub.ZWMPredictor=Predictor
++    source=tmp_path/'zwm'/'zwm_predictor.py'
++    source.parent.mkdir()
++    source.write_text('# stub predictor source for provenance validation\n')
++    sub.__file__=str(source)
++    monkeypatch.setitem(sys.modules,'zwm',parent)
++    monkeypatch.setitem(sys.modules,'zwm.zwm_predictor',sub)
++    adapter=ZWMFeatures('stub.pt',repo_root=str(tmp_path),layer='transformer.h.22')
++    assert adapter.extract(Image.new('RGB',(2,2))).shape==(1,3)
++    adapter.hook.count=99  # A previous failed extraction must not poison this one.
++    assert adapter.extract(Image.new('RGB',(2,2))).shape==(1,3)
++    assert adapter.predictor.calls==2
++    adapter.close()
++
++
++def test_shared_train_entrypoint_uses_separate_python_process(tmp_path,monkeypatch):
++    """Manual train and Optuna both call train_member; no ZWM imported in Sinz."""
++    import sys
++    from sinz_model.trainer import train_member
++    from sinz_model import transformer_bridge
++    called=[]
++    def fake_subprocess(cmd,check):
++        assert check
++        called.append(cmd)
++        resolved=json.loads(Path(cmd[cmd.index('--config')+1]).read_text())
++        assert resolved['model']['family']=='transformer_neural'
++        Path(cmd[cmd.index('--result-file')+1]).write_text(json.dumps({'run_id':'mock-id'}))
++    monkeypatch.setattr(transformer_bridge.subprocess,'run',fake_subprocess)
++    monkeypatch.setattr(transformer_bridge, '_already_in_transformer_runtime', lambda cfg: False)
++    cfg={'model':{'family':'transformer_neural'},
++         'training':{'strategy':'frozen_ridge'},
++         'runtime':{'python_executable':sys.executable},
++         'project':{'output_root':str(tmp_path)}}
++    value=train_member(cfg,0,candidate_id='test-candidate',evaluate_test=False)
++    assert value=='mock-id'
++    assert called[0][:3]==[sys.executable,'-m','transformer_model.train']
++    assert train_member(cfg,0,candidate_id='test-candidate',resume_run_id='abc',
++                        evaluate_test=False)=='mock-id'
++    assert called[-1][called[-1].index('--resume-run-id')+1]=='abc'
++
++
++def test_feature_chunks_resume_after_interrupted_extraction(tmp_path):
++    images=tmp_path/'images'; images.mkdir()
++    for k in range(3):
++        Image.new('RGB',(2,2),(40+k*20,)*3).save(images/f'{k}.png')
++    upstream=tmp_path/'ZWM'; checkpoint=upstream/'out'/'model.pt'
++    checkpoint.parent.mkdir(parents=True); checkpoint.write_bytes(b'checkpoint')
++    cfg={'model':{'backbone':{'model_ref':'model.pt','repo_root':str(upstream),
++               'layer':'layer','pooling':'mean','input_mode':'rgb','cache_chunk_size':1}},
++         'data':{'image_root':str(images)}}
++    idx={f'train:{k}':f'{k}.png' for k in range(3)}
++    class FailingExtractor(FakeExtractor):
++        def extract(self,frame):
++            if self.calls==1:
++                self.calls+=1
++                raise RuntimeError('simulated PBS preemption')
++            return super().extract(frame)
++    first=FailingExtractor()
++    with pytest.raises(RuntimeError,match='preemption'):
++        train_module.extract_cached_features(idx,cfg,tmp_path/'cache',first)
++    assert first.calls==2
++    second=FakeExtractor()
++    lookup,_=train_module.extract_cached_features(idx,cfg,tmp_path/'cache',second)
++    assert len(lookup)==3
++    assert second.calls==2  # first chunk was recovered rather than recomputed
+diff --git a/tests/test_zwm_single_image_runtime.py b/tests/test_zwm_single_image_runtime.py
+new file mode 100644
+index 0000000..e7fc3d7
+--- /dev/null
++++ b/tests/test_zwm_single_image_runtime.py
+@@ -0,0 +1,71 @@
++"""Contract checks for selecting two Python prefixes inside ONE SIF."""
++import json
++import os
++import sys
++from pathlib import Path
++
++import pytest
++
++from sinz_model.orchestrator import RunRegistry
++from sinz_model import transformer_bridge
++from transformer_model import launch
++
++
++def test_bridge_uses_current_python_when_zwm_is_active(tmp_path, monkeypatch):
++    from transformer_model import train as training
++    called=[]
++    monkeypatch.setattr(training,'train_ridge_member',lambda cfg,member_index,candidate_id,**kw:
++                        called.append((cfg,member_index,candidate_id)) or 'fake-run')
++    cfg={'model':{'family':'transformer_neural'},
++         'runtime':{'python_executable':sys.executable},
++         'project':{'output_root':str(tmp_path)}}
++    assert transformer_bridge.train_transformer_member(cfg,0,'candidate',resume_run_id='old-id')=='fake-run'
++    assert called and called[0][2]=='candidate'
++
++
++def test_direct_entrypoint_loads_existing_candidate(tmp_path,monkeypatch):
++    registry=RunRegistry(str(tmp_path/'results.sqlite'))
++    registry.initialize()
++    wf=registry.create_workflow('zwm-test')
++    cfg={'model':{'family':'transformer_neural'},'training':{'strategy':'frozen_ridge'},
++         'project':{'sqlite_path':str(tmp_path/'results.sqlite'),'output_root':str(tmp_path)}}
++    candidate=registry.create_candidate(wf,'test',cfg)['candidate_id']
++    monkeypatch.setattr(launch,'train_ridge_member',
++                        lambda cfg,member,candidate_id,**kw: 'direct-run')
++    assert launch.run(registry.sqlite_path,candidate,0)=='direct-run'
++    with pytest.raises(ValueError, match='not a transformer'):
++        cfg['model']['family']='sinz'
++        other=registry.create_candidate(wf,'test',cfg)['candidate_id']
++        launch.run(registry.sqlite_path,other)
++
++
++def test_one_sif_two_python_prefixes():
++    root=Path(__file__).resolve().parents[1]
++    optuna=(root/'jobs/optuna_trial.pbs').read_text()
++    zwm=(root/'jobs/zwm_train.pbs').read_text()
++    cfg=(root/'configs/tvsd_zwm_ridge.yaml').read_text()
++    assert 'containers/sinz-base.sif' in zwm
++    assert 'containers/sinz-base.sif' in optuna
++    assert 'envs/tvsd-py39/bin/python' in optuna
++    assert 'envs/zwm-py310/bin/python' in optuna
++    assert 'envs/zwm-py310/bin/python' in zwm
++    assert 'strategy: frozen_ridge' in cfg
++    assert 'zwm.sif' not in optuna and 'ZWM_SIF' not in zwm
++
++
++def test_metacentrum_paths_and_single_project_registry():
++    root = Path(__file__).resolve().parents[1]
++    zwm = (root / 'jobs/zwm_train.pbs').read_text()
++    optuna = (root / 'jobs/optuna_trial.pbs').read_text()
++    collector = (root / 'jobs/optuna_collect.pbs').read_text()
++    for script in (zwm, optuna, collector):
++        assert 'code/papala_tsvd_trainer' in script
++        assert 'code/papala_tvsd_trainer' not in script
++    import yaml
++    config = yaml.safe_load((root / 'configs/tvsd_zwm_ridge.yaml').read_text())
++    assert config['project']['sqlite_path'] == config['project']['output_root'] + '/results.sqlite'
++    assert 'results/results.sqlite' in zwm
++    assert '--sqlite-path /worker/zwm_worker.sqlite' in zwm
++    assert 'sqlite_snapshot.py' in zwm
++    assert 'trap on_term TERM' in optuna
++    assert 'trap on_term TERM' in zwm
+diff --git a/transformer_model/README.md b/transformer_model/README.md
+new file mode 100644
+index 0000000..dac0083
+--- /dev/null
++++ b/transformer_model/README.md
+@@ -0,0 +1,181 @@
++# TVSD ZWM: one registry, one Singularity image
++
++The PBS launcher chooses one of two Python prefixes inside `sinz-base.sif`.
++Bind the Brno2 root both at its absolute host path and at `/mnt/tvsd`:
++
++| family | interpreter | strategy |
++|---|---|---|
++| `sinz` | `/mnt/tvsd/envs/tvsd-py39/bin/python` | `gradient` (existing) |
++| `transformer_neural` | `/storage/brno2/home/jonas_prokop/visual_models/envs/zwm-py310/bin/python` | `frozen_ridge` |
++
++Create an independent Python 3.10 prefix with Mamba/Conda on an allocated CPU
++node. A Python 3.9 `venv` cannot supply Python 3.10:
++
++```bash
++ROOT=/storage/brno2/home/jonas_prokop/visual_models
++CODE="$ROOT/code/papala_tsvd_trainer"
++module add micromamba
++micromamba create --prefix "$ROOT/envs/zwm-py310" -c conda-forge python=3.10 pip -y
++# Clone/pin https://github.com/awwkl/ZWM under "$ROOT/code/ZWM" first.
++singularity exec --bind "$ROOT:$ROOT" --bind "$CODE:/project" \
++  "$ROOT/containers/sinz-base.sif" \
++  "$ROOT/envs/zwm-py310/bin/python" -m pip install -e "$ROOT/code/ZWM" \
++     -r /project/requirements-transformer-extra.txt
++```
++
++**GPU compatibility is unverified.** Check CUDA, PyTorch 2.x, and the upstream
++checkpoint inside the image on an allocated node before training. Pin/checksum
++the upstream ZWM source and checkpoint; leave the Sinz environment untouched.
++
++## Execution
++
++Register candidates with `sinz_model.cli candidates create` and
++`configs/tvsd_zwm_ridge.yaml` in Python 3.9. Pass
++`--output-root /mnt/tvsd/results`; the central project registry must be
++`/mnt/tvsd/results/results.sqlite`, including for Optuna.
++
++Check the paths before submitting a job:
++
++```bash
++ROOT=/storage/brno2/home/jonas_prokop/visual_models
++CODE="$ROOT/code/papala_tsvd_trainer"
++test -d "$CODE" && test -f "$ROOT/containers/sinz-base.sif" \
++  && test -x "$ROOT/envs/zwm-py310/bin/python" \
++  && test -x "$ROOT/envs/tvsd-py39/bin/python"
++```
++
++PBS uses `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`. Pre-fill the ZWM
++checkpoint and Hugging Face cache in a separate allocated-node warm-up if
++required; workers intentionally cannot download missing assets.
++
++Run one real-image ZWM smoke test under Python 3.10 before training, through the
++same `sinz-base.sif` with binds `"$CODE:/project"`, `"$ROOT:/mnt/tvsd"`, and
++`"$ROOT:$ROOT"`:
++
++```bash
++# Run on an allocated GPU compute node (not the login node).
++singularity exec --nv \
++  --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" --bind "$ROOT:$ROOT" \
++  "$ROOT/containers/sinz-base.sif" \
++  "$ROOT/envs/zwm-py310/bin/python" -m transformer_model.smoke \
++  --config /project/configs/tvsd_zwm_ridge.yaml \
++  --image /mnt/tvsd/data/assets/THINGS/ACTUAL_IMAGE.jpg
++```
++
++Once the smoke test succeeds, submit one ZWM job:
++
++```bash
++qsub -v CANDIDATE_ID=<uuid> jobs/zwm_train.pbs
++```
++
++This runs `transformer_model.launch` directly in Python 3.10 (no Python 3.9
++parent). Its **only writable SQLite is scratch-local**. Each job creates a
++consistent handoff at
++`$ROOT/results/zwm_handoffs/$CANDIDATE_ID/$PBS_JOBID.sqlite`. After it ends,
++collect explicitly on the login node, running Python 3.9 **inside the same
++image** to avoid host-library incompatibilities:
++
++```bash
++ROOT=/storage/brno2/home/jonas_prokop/visual_models
++CODE="$ROOT/code/papala_tsvd_trainer"
++cd "$CODE"
++export SINGULARITYENV_PYTHONPATH=/project
++singularity exec --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
++  --bind "$ROOT:$ROOT" "$ROOT/containers/sinz-base.sif" \
++  /mnt/tvsd/envs/tvsd-py39/bin/python -m sinz_model.registry_handoff collect \
++  --project-db /mnt/tvsd/results/results.sqlite \
++  --worker-db "/mnt/tvsd/results/zwm_handoffs/$CANDIDATE_ID/$PBS_JOBID.sqlite" \
++  --candidate-id "$CANDIDATE_ID"
++```
++
++The collector imports the one run into a locally staged copy of the project
++database, then atomically publishes it. A shared project coordinator lock
++prevents simultaneous Optuna collection. It is intentionally never merged by
++the compute node.
++
++If a collector is killed, recover **only** when the lock owner PID is confirmed
++dead on the *same host* where it was created:
++
++```bash
++singularity exec --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
++  --bind "$ROOT:$ROOT" "$ROOT/containers/sinz-base.sif" \
++  /mnt/tvsd/envs/tvsd-py39/bin/python -m sinz_model.registry_handoff break-lock \
++  --project-db /mnt/tvsd/results/results.sqlite
++```
++
++The command refuses live PIDs, malformed owner records, and locks belonging to
++other hosts; it never recursively deletes the lock directory. Investigate
++cross-host leftovers manually. For a worker retry, check a completed PBS ID
++with `qstat -x -f JOB_ID` (extended history) before resubmitting.
++
++Optuna also has an independent study-directory lock. If *that* lock is stale,
++run `python -m sinz_model.optuna_batch break-lock --root STUDY_DIR` inside the
++same image and on the host recorded by its `owner` file. It uses identical
++checks; recovering either lock never submits PBS jobs.
++
++Optuna's PBS array workers likewise use node-local SQLite and produce a handoff.
++Their wrapper traps SIGTERM, attempts to stop the child, and snapshots the DB
++before exit. A hard SIGKILL cannot be trapped; all already completed feature
++chunks remain persistent, but the last scratch-only SQLite state may be lost.
++Do not collect unfinished trials until the array has exited.
++
++To avoid accidental cluster allocations, `optuna_batch submit` **prints the
++PBS array command without submitting it** unless `--execute` is supplied.
++`--execute` submits only the array (concurrency defaults to four); an
++additional PBS collection job requires the separate `--schedule-collector`
++opt-in. Prefer manual `optuna_batch collect` after `qstat` shows the array
++has finished. This avoids reserving a separate PBS node merely to merge SQLite.
++PBS worker runtimes are capped at four BLAS threads and have offline Hugging
++Face mode enabled, so they cannot silently download weights on compute nodes.
++
++For `frozen_ridge`, require full training/validation data and disable Optuna
++pruning: ridge yields one final validation score, not SGD epochs.
++Feature extraction is resumable in chunks. ZWM's upstream `ZWMPredictor` owns
++input preprocessing and single-image inference; do not substitute the Sinz
++224px normalized tensor path.
++
++If an Optuna ridge PBS worker fails or is preempted, requeue **the same** trial array
++index. The PBS wrapper seeds local SQLite from `worker_result.sqlite` when it
++exists (otherwise from `worker_seed.sqlite`). The worker retains the original
++run ID, preserves prior failure details in `ridge_retry_history.json`, clears
++partial fit metrics and checkpoints, and reuses cached backbone feature chunks.
++This is a **restart of the ridge fit**, not an SGD epoch-checkpoint resume.
++For a retry to recover features, leave `project.feature_cache_root` intact.
++
++Ridge CV batches neurons with identical observation masks, performs one
++spectral decomposition per fold, and selects alpha per neuron. PBS logs report
++the mask-group count and largest group, which indicate how much batching helps.
++The per-neuron sklearn implementation is retained
++as `fit_masked_ridge_cv_reference` and can be selected with
++`ridge.solver: sklearn_reference` (default: `spectral`).
++The two can be compared in seconds on synthetic CPU data:
++
++```bash
++python -m transformer_model.ridge_smoke
++```
++
++No PBS job or GPU is necessary for this small test. Actual
++walltime must still be measured on TVSD feature dimensions.
++
++The SGD `tvsd_optuna_space.yaml` is **not** a ZWM search space. Layer/pooling
++search currently requires re-extracting features; a multi-layer cache would
++make that comparison cheaper. Do not launch a ZWM Optuna study with the SGD space.
++
++This pipeline is a **frozen-feature neural encoding baseline**, not a
++reproduction of ZWM's published zero-shot benchmarks. The ZWM reference
++checkpoint uses 256px inputs, handled by upstream inference; the TVSD training
++split and `GroupKFold` stimulus grouping prevent image-identity leakage in
++ridge selection. See [ZWM's model/API documentation](https://github.com/awwkl/ZWM)
++and [GroupKFold](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.GroupKFold.html).
++
++Each trained checkpoint and exported bundle contains `valid_neuron_mask`,
++aligned exactly with `neuron_ids` in F/N order. False means the neuron's ridge
++fit lacked enough training observations/groups; its prediction may be NaN.
++Evaluation checks the complete ordered IDs against `neuron_index.csv` before
++using the model. Bundle loading also checks that the readout payload IDs and
++mask match the manifest, and accepts `expected_neuron_ids` to validate an
++external experiment's neuron axis before inference.
++
++**Classical Experiments inference in Python 3.9 remains unverified.** Export
++contains the backbone checkpoint, readout and neuron ordering, but the upstream
++ZWM inference runtime may still require Python 3.10.
+diff --git a/transformer_model/__init__.py b/transformer_model/__init__.py
+new file mode 100644
+index 0000000..d939aa2
+--- /dev/null
++++ b/transformer_model/__init__.py
+@@ -0,0 +1,3 @@
++"""Optional pretrained transformer strategy; no import-time upstream dependency."""
++from .ridge import RidgeReadout, FittedRidge, fit_masked_ridge_cv
++from .model import TransformerNeuralModel, ZWMNeuralModel, load_zwm_bundle
+diff --git a/transformer_model/backbones.py b/transformer_model/backbones.py
+new file mode 100644
+index 0000000..321e176
+--- /dev/null
++++ b/transformer_model/backbones.py
+@@ -0,0 +1,55 @@
++"""ZWM upstream inference adapter (no ZWM source copied into this project)."""
++from __future__ import annotations
++from pathlib import Path
++import torch
++from .features import FeatureHook, pool_tokens
++
++
++class ZWMFeatures:
++    """Capture representations while ZWM's own single-image inference runs.
++
++    The upstream model (checkpoint, predictor, transforms) is provided by the
++    separately installed ZWM package. We deliberately do not call model(image).
++    """
++    def __init__(self, model_ref: str, *, repo_root: str, layer: str,
++                 pooling: str = 'mean'):
++        import zwm.zwm_predictor as upstream
++        ZWMPredictor = upstream.ZWMPredictor
++        self.repo_root = Path(repo_root).resolve()
++        if not (self.repo_root / 'out' / model_ref).is_file():
++            raise FileNotFoundError(f'ZWM checkpoint missing: {self.repo_root / "out" / model_ref}')
++        # samefile handles the two Singularity bind aliases /mnt/tvsd and
++        # /storage/... for one physical checkout.
++        module_file=Path(upstream.__file__).resolve()
++        if not any(module_file.samefile(path) for path in
++                   self.repo_root.rglob('zwm_predictor.py') if path.is_file()):
++            raise RuntimeError('Loaded ZWM package is not from model.backbone.repo_root')
++        # Upstream ModelFactory finds its own repository; require a matching tree.
++        # Ensure that repo_root points to the installed upstream source checkout.
++        self.predictor = ZWMPredictor(model_ref)
++        self.model_ref = model_ref
++        self.layer = layer
++        self.pooling = pooling
++        # Avoid assumptions about whether upstream calls the torch module
++        # predictor.model, predictor.zwm_model, etc. Resolve by layer topology.
++        owners = []
++        for value in vars(self.predictor).values():
++            if isinstance(value, torch.nn.Module):
++                try:
++                    value.get_submodule(layer)
++                except AttributeError:
++                    continue
++                owners.append(value)
++        if len(owners) != 1:
++            raise RuntimeError(f'Cannot uniquely resolve ZWM layer {layer!r}: {len(owners)} matches')
++        self.hook = FeatureHook(owners[0], layer)
++
++    @torch.inference_mode()
++    def extract(self, image):
++        self.hook.activation = None
++        self.hook.count = 0
++        self.predictor.single_image_forward(image, frame_gap=-1)
++        return pool_tokens(self.hook.take(), self.pooling).detach().float().cpu().numpy()
++
++    def close(self):
++        self.hook.close()
+diff --git a/transformer_model/evaluate.py b/transformer_model/evaluate.py
+new file mode 100644
+index 0000000..e772a03
+--- /dev/null
++++ b/transformer_model/evaluate.py
+@@ -0,0 +1,84 @@
++"""Explicit post-selection test evaluation for a frozen transformer candidate.
++
++No training path calls this automatically. Uses the project's own test metric
++(correlation to repeated-image average) and writes the existing registry.
++"""
++from __future__ import annotations
++import argparse
++import json
++from pathlib import Path
++
++import numpy as np
++import torch
++from sinz_model.analysis import correlation_to_average, summarize_correlations
++from sinz_model.orchestrator import RunRegistry
++from sinz_model.tvsd_data import TVSDTrainingBundle
++from .ridge import RidgeReadout
++from .train import _images_index, _neuron_order, extract_cached_features
++
++
++def evaluate_ridge_run(sqlite_path, run_id, *, extractor=None):
++    registry=RunRegistry(sqlite_path)
++    run=registry.get_run(run_id)
++    if run['status']!='completed':
++        raise ValueError('Cannot evaluate incomplete ridge run')
++    cfg=json.loads(run['config_json'])
++    if cfg.get('model',{}).get('family')!='transformer_neural':
++        raise ValueError('Not a transformer neural run')
++    ckpt=Path(registry.best_checkpoint(run_id))
++    state=torch.load(ckpt,map_location='cpu',weights_only=True)
++    params=state['readout_state_dict']
++    readout=RidgeReadout(params['weight'],params['bias'],params['feature_mean'],params['feature_scale'])
++    bundle=TVSDTrainingBundle(cfg)
++    if state['neuron_ids'] != _neuron_order(cfg,bundle):
++        raise ValueError('Readout neuron order differs from TVSD dataset')
++    valid_mask=np.asarray(state['valid_neuron_mask'],dtype=bool)
++    if valid_mask.shape != (len(state['neuron_ids']),):
++        raise ValueError('Invalid fitted-neuron mask in checkpoint')
++    if extractor is None:
++        from .backbones import ZWMFeatures
++        bc=cfg['model']['backbone']
++        extractor=ZWMFeatures(bc['model_ref'],repo_root=bc['repo_root'],
++                              layer=bc['layer'],pooling=bc.get('pooling','mean'))
++    try:
++        lookup,_=extract_cached_features(_images_index(bundle.test.rows),cfg,
++                      Path(cfg['project']['feature_cache_root']),extractor)
++        features=np.stack([lookup[s] for s in bundle.test.rows.stimulus_id])
++        with torch.inference_mode():
++            prediction=readout(torch.from_numpy(features)).numpy()
++        corr,_=correlation_to_average(prediction,bundle.test.responses,
++                                      bundle.test.mask,bundle.test.image_ids)
++        corr[~valid_mask] = np.nan
++        summary=summarize_correlations(corr)
++        if summary['n_valid']==0:
++            raise ValueError('No valid test correlations')
++        out=Path(run['run_dir'])/'evaluation_recheck'
++        out.mkdir(parents=True,exist_ok=True)
++        report=out/'transformer_test.json'
++        report.write_text(json.dumps({'summary':summary, 'run_id':run_id,
++                'valid_neurons':summary['n_valid'],
++                'test_metric':'corr_to_average'},indent=2)+'\n')
++        for idx,value in enumerate(corr):
++            if np.isfinite(value):
++                registry.log_metric(run_id,'test','corr_to_average','neuron',float(value),neuron_id=idx)
++        registry.log_metric(run_id,'test','corr_to_average','mean',summary['mean'])
++        registry.log_metric(run_id,'test','corr_to_average','median',summary['median'])
++        registry.log_artifact(run_id,'test_evaluation',str(report))
++        print(json.dumps(summary,sort_keys=True),flush=True)
++        return summary
++    finally:
++        if hasattr(extractor,'close'):
++            extractor.close()
++
++
++def main():
++    p=argparse.ArgumentParser()
++    p.add_argument('--sqlite-path',required=True)
++    p.add_argument('--run-id',required=True)
++    p.add_argument('--result-file',required=True)
++    args=p.parse_args()
++    result=evaluate_ridge_run(args.sqlite_path,args.run_id)
++    Path(args.result_file).write_text(json.dumps({'summary':result})+'\n')
++
++if __name__=='__main__':
++    main()
+diff --git a/transformer_model/export.py b/transformer_model/export.py
+new file mode 100644
+index 0000000..343afc1
+--- /dev/null
++++ b/transformer_model/export.py
+@@ -0,0 +1,19 @@
++"""Export transformer checkpoint+readout from the common project registry."""
++import argparse
++import json
++from pathlib import Path
++from .model import export_zwm_bundle
++
++
++def main():
++    p=argparse.ArgumentParser()
++    p.add_argument('--sqlite-path',required=True)
++    p.add_argument('--candidate-id',required=True)
++    p.add_argument('--destination',required=True)
++    p.add_argument('--result-file',required=True)
++    a=p.parse_args()
++    result=export_zwm_bundle(a.sqlite_path,a.candidate_id,a.destination)
++    Path(a.result_file).write_text(json.dumps({'destination':str(result)})+'\n')
++    print(result)
++if __name__=='__main__':
++    main()
+diff --git a/transformer_model/features.py b/transformer_model/features.py
+new file mode 100644
+index 0000000..6592923
+--- /dev/null
++++ b/transformer_model/features.py
+@@ -0,0 +1,44 @@
++"""Read-only activation capture; pooling conventions are explicit experiment choices."""
++from __future__ import annotations
++import torch
++
++
++def pool_tokens(t, mode='mean'):
++    if isinstance(t, (list,tuple)):
++        t = t[0]
++    if not isinstance(t, torch.Tensor):
++        raise TypeError(f'Expected tensor activation, got {type(t)}')
++    if t.ndim == 2:
++        return t
++    if mode == 'flatten':
++        return t.flatten(1)
++    if t.ndim == 3:
++        if mode == 'mean':
++            return t.mean(dim=1)
++        if mode == 'cls':
++            return t[:,0]
++    if t.ndim == 4 and mode == 'mean':
++        return t.mean(dim=(-2,-1))
++    raise ValueError(f'Unsupported activation {tuple(t.shape)} and pooling {mode}')
++
++
++class FeatureHook:
++    def __init__(self, module:torch.nn.Module, layer:str):
++        self.layer=layer
++        self.activation=None
++        self.count=0
++        self.handle=module.get_submodule(layer).register_forward_hook(self._capture)
++    def _capture(self, module, args, output):
++        self.count += 1
++        self.activation=output[0] if isinstance(output,(tuple,list)) else output
++    def take(self):
++        if self.activation is None:
++            raise RuntimeError(f'Layer {self.layer} did not execute')
++        if self.count != 1:
++            raise RuntimeError(f'Layer {self.layer} executed {self.count} times during one extraction; ambiguous activation')
++        value=self.activation
++        self.activation=None
++        self.count=0
++        return value
++    def close(self):
++        self.handle.remove()
+diff --git a/transformer_model/launch.py b/transformer_model/launch.py
+new file mode 100644
+index 0000000..1989e94
+--- /dev/null
++++ b/transformer_model/launch.py
+@@ -0,0 +1,49 @@
++"""Standalone ZWM train entrypoint: no second Python process or Sinz CLI imports.
++
++The caller must already be in the selected Python 3.10 environment. Candidate
++config and all results are read/written using the existing project RunRegistry.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from pathlib import Path
++
++from sinz_model.orchestrator import RunRegistry, candidate_config_sha256
++from .train import train_ridge_member
++
++
++def run(sqlite_path: str, candidate_id: str, member: int = 0) -> str:
++    registry = RunRegistry(sqlite_path)
++    cfg = registry.get_candidate_config(candidate_id)
++    if cfg.get('model', {}).get('family') != 'transformer_neural':
++        raise ValueError('The selected candidate is not a transformer_neural model')
++    if cfg.get('training', {}).get('strategy') != 'frozen_ridge':
++        raise NotImplementedError('Only frozen_ridge is currently implemented for transformer_neural')
++    # project.sqlite_path is execution-only: standalone PBS workers receive a
++    # private scratch snapshot, never the central network-storage SQLite file.
++    cfg['project']['sqlite_path'] = str(Path(sqlite_path).resolve())
++    if candidate_config_sha256(cfg) != registry.get_candidate(candidate_id)['config_sha256']:
++        raise ValueError('Execution override changed candidate identity')
++    runs = registry.candidate_runs(candidate_id, member_index=member)
++    if len(runs) > 1:
++        raise RuntimeError('Multiple runs for a single deterministic ridge member')
++    if runs and runs[0]['status'] == 'completed':
++        return runs[0]['run_id']
++    return train_ridge_member(cfg, member, candidate_id, evaluate_test=False,
++                              resume_run_id=(runs[0]['run_id'] if runs else None))
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description='Train one ZWM candidate in the selected Python runtime')
++    parser.add_argument('--sqlite-path', required=True)
++    parser.add_argument('--candidate-id', required=True)
++    parser.add_argument('--member', type=int, default=0)
++    args = parser.parse_args()
++    run_id = run(args.sqlite_path, args.candidate_id, args.member)
++    print(json.dumps({'run_id': run_id, 'runtime_python': sys.executable}), flush=True)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/transformer_model/model.py b/transformer_model/model.py
+new file mode 100644
+index 0000000..8419a2e
+--- /dev/null
++++ b/transformer_model/model.py
+@@ -0,0 +1,206 @@
++"""Frozen transformer readout: generic toy adapter and portable ZWM handoff."""
++from __future__ import annotations
++import hashlib
++import json
++from pathlib import Path
++import shutil
++from types import SimpleNamespace
++
++import numpy as np
++import torch
++from torch import nn
++from .features import FeatureHook,pool_tokens
++from .ridge import RidgeReadout
++
++
++class TransformerNeuralModel(nn.Module):
++    """Generic hook model used for tests and alternative pretrained backbones."""
++    def __init__(self, backbone, readout, *, forward_image, layer, pooling='mean'):
++        super().__init__()
++        self.backbone=backbone.requires_grad_(False).eval()
++        self.readout=readout
++        self.forward_image=forward_image
++        self.layer=layer
++        self.pooling=pooling
++        self._hook=FeatureHook(backbone,layer)
++    def train(self,mode=True):
++        super().train(mode)
++        self.backbone.eval()
++        return self
++    def features(self, images):
++        self._hook.activation=None
++        self._hook.count=0
++        with torch.no_grad():
++            self.forward_image(self.backbone,images)
++            return pool_tokens(self._hook.take(),self.pooling)
++    def forward(self,images):
++        return self.readout(self.features(images))
++    @torch.inference_mode()
++    def predict(self,images):
++        return self(images)
++    def close(self):
++        self._hook.close()
++
++
++def export_model(model, output_dir, *, metadata):
++    """Prototype generic exporter retained for toy models; no pickle of classes."""
++    out=Path(output_dir); out.mkdir(parents=True,exist_ok=True)
++    config=dict(metadata)
++    config.update({'layer':model.layer,'pooling':model.pooling,
++                   'readout_features':model.readout.weight.shape[1],
++                   'num_neurons':model.readout.weight.shape[0],'format_version':1})
++    (out/'manifest.json').write_text(json.dumps(config,indent=2,default=str))
++    torch.save(model.backbone.state_dict(),out/'backbone_state.pt')
++    torch.save(model.readout.state_dict(),out/'readout_state.pt')
++    return out
++
++
++def load_export(path, *, build_backbone, forward_image, map_location='cpu'):
++    p=Path(path); manifest=json.loads((p/'manifest.json').read_text())
++    backbone=build_backbone(manifest)
++    backbone.load_state_dict(torch.load(p/'backbone_state.pt',map_location=map_location,weights_only=True))
++    state=torch.load(p/'readout_state.pt',map_location=map_location,weights_only=True)
++    readout=RidgeReadout(state['weight'],state['bias'],state['feature_mean'],state['feature_scale'])
++    model=TransformerNeuralModel(backbone,readout,forward_image=forward_image,
++                                 layer=manifest['layer'],pooling=manifest['pooling'])
++    return model,manifest
++
++
++def _sha256(path):
++    digest=hashlib.sha256()
++    with Path(path).open('rb') as stream:
++        for buf in iter(lambda:stream.read(1024*1024),b''):
++            digest.update(buf)
++    return digest.hexdigest()
++
++
++def export_zwm_bundle(sqlite_path, candidate_id, output_dir):
++    """Self-contained data/weights bundle for a selected frozen ZWM candidate.
++
++    Inference still requires upstream ZWM source and a compatible Python runtime,
++    but needs no training database, image bank, or downloaded checkpoint.
++    """
++    from sinz_model.orchestrator import RunRegistry
++    reg=RunRegistry(sqlite_path)
++    candidate=reg.get_candidate(candidate_id)
++    cfg=json.loads(candidate['config_json'])
++    if cfg.get('model',{}).get('family')!='transformer_neural':
++        raise ValueError('Not a transformer neural candidate')
++    runs=reg.candidate_runs(candidate_id)
++    if len(runs)!=1 or runs[0]['status']!='completed':
++        raise ValueError('Export requires one completed ridge run')
++    run=runs[0]
++    checkpoint=Path(run['run_dir'])/'checkpoints/best.pt'
++    state=torch.load(checkpoint,map_location='cpu',weights_only=True)
++    from .train import _neuron_order
++    widths=cfg['model']['readout']['outdims_by_animal']
++    if state['neuron_ids'] != _neuron_order(cfg,SimpleNamespace(widths=widths)):
++        raise ValueError('Cannot export: checkpoint neuron order differs from neuron_index.csv')
++    valid_mask=state['valid_neuron_mask'].to(dtype=torch.bool)
++    if (valid_mask.shape!=(len(state['neuron_ids']),) or
++            not torch.equal(valid_mask,torch.isfinite(state['readout_state_dict']['bias']))):
++        raise ValueError('Invalid fitted-neuron mask in checkpoint')
++    bc=cfg['model']['backbone']
++    source=Path(bc['repo_root'])/'out'/bc['model_ref']
++    if not source.is_file():
++        raise FileNotFoundError(f'Upstream checkpoint not found: {source}')
++    dest=Path(output_dir)
++    if dest.exists():
++        raise FileExistsError(dest)
++    dest.mkdir(parents=True)
++    try:
++        shutil.copyfile(source,dest/'model.pt')
++        # Duplicate ordered IDs and mask in the readout payload, so reload
++        # can detect a mismatched manifest even without the training dataset.
++        torch.save({**state['readout_state_dict'],
++                    'neuron_ids':list(state['neuron_ids']),
++                    'valid_neuron_mask':valid_mask},dest/'readout_state.pt')
++        manifest={
++            'format':'tvsd_zwm_ridge_v1',
++            'backbone_kind':'zwm', 'upstream_ref':bc['model_ref'],
++            'checkpoint_sha256':_sha256(dest/'model.pt'),
++            'readout_sha256':_sha256(dest/'readout_state.pt'),
++            'forward_mode':'one_image', 'frame_gap':-1,
++            'layer':bc['layer'], 'pooling':bc.get('pooling','mean'),
++            'input_mode':bc.get('input_mode','grayscale_rgb'),
++            'neuron_ids':state['neuron_ids'],
++            'valid_neuron_mask':valid_mask.tolist(),
++            'num_neurons':len(state['neuron_ids']),
++            'candidate_id':candidate_id, 'run_id':run['run_id'],
++            'split_sha256':run['split_sha256'], 'dataset_fingerprint':run['dataset_fingerprint'],
++            'validation':state['validation'],
++            'feature_scaling':'per_neuron_train_fold_zscore; coefficients converted to raw features',
++        }
++        (dest/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
++    except Exception:
++        shutil.rmtree(dest,ignore_errors=True)
++        raise
++    return dest
++
++
++class ZWMNeuralModel(nn.Module):
++    """Inference-only readout; expects PIL images (not Sinz-normalized tensors)."""
++    def __init__(self, extractor, readout, manifest):
++        super().__init__()
++        self.extractor=extractor
++        self.readout=readout
++        self.manifest=manifest
++    @torch.inference_mode()
++    def predict(self, image):
++        from PIL import ImageOps
++        images=image if isinstance(image,(list,tuple)) else [image]
++        features=[]
++        for img in images:
++            rgb=img.convert('RGB')
++            if self.manifest['input_mode']=='grayscale_rgb':
++                rgb=ImageOps.grayscale(rgb).convert('RGB')
++            arr=np.asarray(self.extractor.extract(rgb),dtype=np.float32)
++            if arr.ndim!=2 or arr.shape[0]!=1:
++                raise ValueError('Unexpected ZWM feature shape')
++            features.append(arr[0])
++        return self.readout(torch.from_numpy(np.stack(features)))
++    def close(self):
++        self.extractor.close()
++
++
++def load_zwm_bundle(path, *, zwm_repo_root, expected_neuron_ids=None):
++    """Load packaged checkpoint through upstream predictor in the new ZWM env.
++
++    A stable symlink under ZWM's out/tvsd_bundles allows its native ModelFactory
++    to find the bundle without copying another 170M checkpoint into the source.
++    """
++    from .backbones import ZWMFeatures
++    path=Path(path).resolve()
++    manifest=json.loads((path/'manifest.json').read_text())
++    if manifest['format']!='tvsd_zwm_ridge_v1':
++        raise ValueError('Unrecognized model bundle')
++    if _sha256(path/'model.pt')!=manifest['checkpoint_sha256'] or _sha256(path/'readout_state.pt')!=manifest['readout_sha256']:
++        raise ValueError('Bundle checksum mismatch')
++    state=torch.load(path/'readout_state.pt',map_location='cpu',weights_only=True)
++    neuron_ids=manifest['neuron_ids']
++    valid_mask=manifest['valid_neuron_mask']
++    if (len(neuron_ids)!=manifest['num_neurons'] or
++            any(not isinstance(n,str) or not n for n in neuron_ids) or
++            len(set(neuron_ids))!=len(neuron_ids) or
++            state['neuron_ids']!=neuron_ids):
++        raise ValueError('Bundle neuron identities/order mismatch')
++    if (len(valid_mask)!=len(neuron_ids) or
++            any(type(v) is not bool for v in valid_mask) or
++            state['valid_neuron_mask'].tolist()!=valid_mask or
++            torch.isfinite(state['bias']).tolist()!=valid_mask):
++        raise ValueError('Bundle fitted-neuron mask mismatch')
++    if expected_neuron_ids is not None and list(expected_neuron_ids)!=neuron_ids:
++        raise ValueError('Bundle neuron order differs from expected dataset')
++    readout=RidgeReadout(state['weight'],state['bias'],state['feature_mean'],state['feature_scale'])
++    if readout.weight.shape[0]!=manifest['num_neurons']:
++        raise ValueError('Neuron count mismatch')
++    ref=Path('tvsd_bundles')/manifest['checkpoint_sha256']/'model.pt'
++    target=Path(zwm_repo_root).resolve()/'out'/ref
++    target.parent.mkdir(parents=True,exist_ok=True)
++    if not target.exists():
++        target.symlink_to(path/'model.pt')
++    if target.resolve()!= (path/'model.pt').resolve():
++        raise FileExistsError(f'Different model at {target}')
++    extractor=ZWMFeatures(str(ref),repo_root=str(zwm_repo_root),
++                          layer=manifest['layer'],pooling=manifest['pooling'])
++    return ZWMNeuralModel(extractor,readout,manifest)
+diff --git a/transformer_model/ridge.py b/transformer_model/ridge.py
+new file mode 100644
+index 0000000..e9dab70
+--- /dev/null
++++ b/transformer_model/ridge.py
+@@ -0,0 +1,208 @@
++"""Masked per-neuron ridge with strictly train-fold-fitted feature scalers.
++
++The frozen TVSD split determines evaluation. GroupKFold is used ONLY within its
++training partition to select regularization. No validation/test responses used.
++"""
++from __future__ import annotations
++from dataclasses import dataclass
++
++import numpy as np
++import torch
++from torch import nn
++from sklearn.linear_model import Ridge
++from sklearn.model_selection import GroupKFold
++
++
++@dataclass
++class FittedRidge:
++    readout: 'RidgeReadout'
++    alphas: np.ndarray
++    cv_scores: np.ndarray
++    valid_train_counts: np.ndarray
++    valid_neuron_mask: np.ndarray
++
++
++class RidgeReadout(nn.Module):
++    """Frozen neuron-specific linear map, with exportable numeric buffers."""
++    def __init__(self, weight, bias, feature_mean, feature_scale):
++        super().__init__()
++        w = torch.as_tensor(np.asarray(weight).copy(), dtype=torch.float32)
++        b = torch.as_tensor(np.asarray(bias).copy(), dtype=torch.float32)
++        mu = torch.as_tensor(np.asarray(feature_mean).copy(), dtype=torch.float32)
++        sd = torch.as_tensor(np.asarray(feature_scale).copy(), dtype=torch.float32)
++        if w.ndim != 2 or b.shape != (w.shape[0],):
++            raise ValueError('weight must be [neurons,features], bias [neurons]')
++        if mu.shape != (w.shape[1],) or sd.shape != mu.shape or (sd <= 0).any():
++            raise ValueError('Invalid feature scaler')
++        for name, value in [('weight',w),('bias',b),('feature_mean',mu),('feature_scale',sd)]:
++            self.register_buffer(name, value)
++
++    def forward(self, x):
++        return nn.functional.linear((x.float() - self.feature_mean) / self.feature_scale,
++                                    self.weight, self.bias)
++
++
++def _scale_fit(x):
++    mu = x.mean(axis=0)
++    sd = x.std(axis=0)
++    sd[sd < 1e-12] = 1.
++    return mu, sd
++
++
++def fit_masked_ridge_cv_reference(features, responses, observation_mask, *, train_indices,
++                                  groups, alphas=(0.01, 0.1, 1., 10., 100.), cv_folds=5):
++    """Reference sklearn implementation for numerical regression tests.
++
++    Fitted coefficients are transformed back to raw-feature space. This lets a
++    single PyTorch linear readout represent independently standardized neurons.
++    """
++    x = np.asarray(features, dtype=np.float64)
++    y = np.asarray(responses, dtype=np.float64)
++    m = np.asarray(observation_mask, dtype=bool)
++    group = np.asarray(groups)
++    tr = np.asarray(train_indices, dtype=int)
++    grid = np.asarray(alphas, dtype=np.float64)
++    if (x.ndim != 2 or y.ndim != 2 or y.shape != m.shape or
++            len(x) != len(y) or group.shape != (len(x),)):
++        raise ValueError('X, Y, mask or groups have incompatible shapes')
++    if not len(tr) or len(np.unique(tr)) != len(tr) or (tr < 0).any() or (tr >= len(x)).any():
++        raise ValueError('train_indices must be unique valid row indices')
++    if not np.isfinite(x[tr]).all() or not np.isfinite(y[tr][m[tr]]).all():
++        raise ValueError('Nonfinite observed training features/responses')
++    if not len(grid) or not np.isfinite(grid).all() or (grid <= 0).any():
++        raise ValueError('All ridge alpha values must be positive and finite')
++    n, d = y.shape[1], x.shape[1]
++    w = np.zeros((n,d), dtype=np.float64)
++    b = np.full(n, np.nan, dtype=np.float64)
++    selected = np.full(n, np.nan, dtype=np.float64)
++    scores = np.full(n, np.nan, dtype=np.float64)
++    counts = np.zeros(n, dtype=int)
++    valid = np.zeros(n, dtype=bool)
++    for j in range(n):
++        rows = tr[m[tr,j]]
++        counts[j] = len(rows)
++        k = min(int(cv_folds), len(np.unique(group[rows])))
++        if len(rows) < 3 or k < 2:
++            continue
++        folds = list(GroupKFold(n_splits=k).split(x[rows], y[rows,j], groups=group[rows]))
++        losses = []
++        for alpha in grid:
++            errors = []
++            for a, v in folds:
++                xa, xv = x[rows[a]], x[rows[v]]
++                mu, sd = _scale_fit(xa)  # Critical: held-out fold must not set scale
++                reg = Ridge(alpha=float(alpha), fit_intercept=True)
++                reg.fit((xa-mu)/sd, y[rows[a],j])
++                pred = reg.predict((xv-mu)/sd)
++                errors.append(float(np.mean((pred-y[rows[v],j])**2)))
++            losses.append(np.mean(errors))
++        best = int(np.argmin(losses))
++        mu, sd = _scale_fit(x[rows])
++        reg = Ridge(alpha=float(grid[best]), fit_intercept=True)
++        reg.fit((x[rows]-mu)/sd, y[rows,j])
++        w[j] = np.asarray(reg.coef_) / sd
++        b[j] = float(reg.intercept_) - float(w[j] @ mu)
++        selected[j] = grid[best]
++        scores[j] = -float(losses[best])
++        valid[j] = True
++    # Each neuron's scaling is folded exactly into its raw-space coefficients.
++    readout = RidgeReadout(w,b,np.zeros(d),np.ones(d))
++    return FittedRidge(readout, selected, scores, counts, valid)
++
++
++def _spectral_ridge(x, y):
++    """One covariance eigendecomposition; solve arbitrary per-output alphas.
++
++    Centering implements an unpenalized intercept, matching sklearn Ridge.
++    The dual formulation avoids an expensive d-by-d decomposition when d > n.
++    """
++    center_x=x.mean(axis=0)
++    center_y=y.mean(axis=0)
++    centered_x=x-center_x
++    centered_y=y-center_y
++    if x.shape[1] <= x.shape[0]:
++        gram=centered_x.T @ centered_x
++        eig, basis=np.linalg.eigh(gram)
++        eig=np.maximum(eig,0.)
++        projected=basis.T @ (centered_x.T @ centered_y)
++
++        def coefficients(alpha):
++            return basis @ (projected / (eig[:,None] + np.asarray(alpha)[None,:]))
++    else:
++        gram=centered_x @ centered_x.T
++        eig, basis=np.linalg.eigh(gram)
++        eig=np.maximum(eig,0.)
++        projected=basis.T @ centered_y
++
++        def coefficients(alpha):
++            fitted=basis @ (projected / (eig[:,None] + np.asarray(alpha)[None,:]))
++            return centered_x.T @ fitted
++    return coefficients, center_x, center_y
++
++
++def fit_masked_ridge_cv(features, responses, observation_mask, *, train_indices,
++                        groups, alphas=(0.01, 0.1, 1., 10., 100.), cv_folds=5):
++    """Batched masked ridge with exact stimulus groups and isolated CV scalers.
++
++    Neurons sharing their *full* training observation mask share the scaler,
++    folds and one eigensolve per fold. Each neuron still selects its own alpha.
++    """
++    x=np.asarray(features,dtype=np.float64)
++    y=np.asarray(responses,dtype=np.float64)
++    mask=np.asarray(observation_mask,dtype=bool)
++    groups=np.asarray(groups)
++    tr=np.asarray(train_indices,dtype=int)
++    grid=np.asarray(alphas,dtype=np.float64)
++    if (x.ndim!=2 or y.ndim!=2 or y.shape!=mask.shape or
++            len(x)!=len(y) or groups.shape!=(len(x),)):
++        raise ValueError('X, Y, mask or groups have incompatible shapes')
++    if not len(tr) or len(np.unique(tr))!=len(tr) or (tr<0).any() or (tr>=len(x)).any():
++        raise ValueError('train_indices must be unique valid row indices')
++    if not np.isfinite(x[tr]).all() or not np.isfinite(y[tr][mask[tr]]).all():
++        raise ValueError('Nonfinite observed training features/responses')
++    if not len(grid) or not np.isfinite(grid).all() or (grid<=0).any():
++        raise ValueError('All ridge alpha values must be positive and finite')
++    n,d=y.shape[1],x.shape[1]
++    weights=np.zeros((n,d),dtype=np.float64)
++    bias=np.full(n,np.nan,dtype=np.float64)
++    selected=np.full(n,np.nan,dtype=np.float64)
++    scores=np.full(n,np.nan,dtype=np.float64)
++    counts=mask[tr].sum(axis=0).astype(int)
++    valid=np.zeros(n,dtype=bool)
++    by_mask={}
++    for j in range(n):
++        by_mask.setdefault(mask[tr,j].tobytes(),[]).append(j)
++    print(f'Ridge mask groups: {len(by_mask)} for {n} neurons; '
++          f'largest group: {max(map(len, by_mask.values()), default=0)}', flush=True)
++    for indices in by_mask.values():
++        cols=np.asarray(indices,dtype=int)
++        rows=tr[mask[tr,cols[0]]]
++        k=min(int(cv_folds),len(np.unique(groups[rows])))
++        if len(rows)<3 or k<2:
++            continue
++        target=y[np.ix_(rows,cols)]
++        folds=GroupKFold(n_splits=k).split(x[rows],target,groups=groups[rows])
++        losses=np.zeros((len(grid),len(cols)),dtype=np.float64)
++        for a,v in folds:
++            xa,xv=x[rows[a]],x[rows[v]]
++            mu,sd=_scale_fit(xa)
++            normalized=(xa-mu)/sd
++            solve,xmean,ymean=_spectral_ridge(normalized,target[a])
++            val=(xv-mu)/sd-xmean
++            for i,alpha in enumerate(grid):
++                coef=solve(np.full(len(cols),alpha))
++                prediction=val @ coef+ymean
++                losses[i]+=np.mean((prediction-target[v])**2,axis=0)/k
++        best=np.argmin(losses,axis=0)
++        alphas_selected=grid[best]
++        mu,sd=_scale_fit(x[rows])
++        solve,xmean,ymean=_spectral_ridge((x[rows]-mu)/sd,target)
++        coef=solve(alphas_selected)
++        raw_coef=coef/sd[:,None]
++        weights[cols]=raw_coef.T
++        bias[cols]=ymean-(mu/sd+xmean) @ coef
++        selected[cols]=alphas_selected
++        scores[cols]=-losses[best,np.arange(len(cols))]
++        valid[cols]=True
++    readout=RidgeReadout(weights,bias,np.zeros(d),np.ones(d))
++    return FittedRidge(readout,selected,scores,counts,valid)
+diff --git a/transformer_model/ridge_smoke.py b/transformer_model/ridge_smoke.py
+new file mode 100644
+index 0000000..69cb184
+--- /dev/null
++++ b/transformer_model/ridge_smoke.py
+@@ -0,0 +1,48 @@
++"""Tiny CPU-only numerical equivalence check for ridge solvers.
++
++Run on a development machine: python -m transformer_model.ridge_smoke
++No checkpoint, network, PBS allocation, or TVSD data is loaded.
++"""
++from __future__ import annotations
++
++from time import perf_counter
++
++import numpy as np
++import torch
++
++from .ridge import fit_masked_ridge_cv, fit_masked_ridge_cv_reference
++
++
++def main():
++    rng=np.random.default_rng(2026)
++    x=rng.normal(size=(48,8))
++    y=x @ rng.normal(size=(8,6))+rng.normal(scale=0.05,size=(48,6))
++    observed=np.ones_like(y,dtype=bool)
++    observed[::5,:2]=False
++    observed[::7,2:4]=False
++    observed[:,5]=False
++    observed[:2,5]=True
++    args=dict(train_indices=np.arange(36),groups=np.repeat(np.arange(24),2),
++              alphas=(.01,.1,1.,10.),cv_folds=3)
++    start=perf_counter()
++    slow=fit_masked_ridge_cv_reference(x,y,observed,**args)
++    slow_s=perf_counter()-start
++    start=perf_counter()
++    fast=fit_masked_ridge_cv(x,y,observed,**args)
++    fast_s=perf_counter()-start
++    np.testing.assert_array_equal(fast.valid_neuron_mask,slow.valid_neuron_mask)
++    np.testing.assert_allclose(fast.alphas,slow.alphas,equal_nan=True)
++    np.testing.assert_allclose(fast.cv_scores,slow.cv_scores,equal_nan=True,
++                               rtol=1e-5,atol=1e-6)
++    torch.testing.assert_close(fast.readout.weight,slow.readout.weight,
++                               rtol=1e-4,atol=1e-5)
++    valid=fast.valid_neuron_mask
++    torch.testing.assert_close(fast.readout.bias[valid],slow.readout.bias[valid],
++                               rtol=1e-4,atol=1e-5)
++    print('PASS: fast and sklearn_reference ridge agree on grouped repeated images')
++    print(f'CPU synthetic timings: spectral={fast_s:.3f}s sklearn_reference={slow_s:.3f}s')
++    print('These tiny timings are not a production-scale performance benchmark.')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/transformer_model/smoke.py b/transformer_model/smoke.py
+new file mode 100644
+index 0000000..4062989
+--- /dev/null
++++ b/transformer_model/smoke.py
+@@ -0,0 +1,43 @@
++"""One image: verify ZWM checkpoint, upstream inference path, and selected layer."""
++from __future__ import annotations
++import argparse
++import json
++import numpy as np
++from pathlib import Path
++from PIL import Image, ImageOps
++from sinz_model.runtime import load_config
++from .backbones import ZWMFeatures
++
++
++def main():
++    parser=argparse.ArgumentParser()
++    parser.add_argument('--config',required=True)
++    parser.add_argument('--image',required=True,help='Path to one real TVSD THINGS image')
++    args=parser.parse_args()
++    cfg=load_config(args.config)
++    bc=cfg['model']['backbone']
++    if bc.get('forward_mode','one_image')!='one_image':
++        raise ValueError('Unsupported inference mode')
++    extractor=ZWMFeatures(bc['model_ref'],repo_root=bc['repo_root'],
++                          layer=bc['layer'],pooling=bc.get('pooling','mean'))
++    try:
++        with Image.open(args.image) as src:
++            img=src.convert('RGB')
++        if bc.get('input_mode','grayscale_rgb')=='grayscale_rgb':
++            img=ImageOps.grayscale(img).convert('RGB')
++        out=extractor.extract(img)
++        repeat=extractor.extract(img)
++        if out.ndim != 2 or out.shape[0] != 1 or out.shape[1] == 0:
++            raise RuntimeError(f'Unexpected ZWM feature shape: {out.shape}')
++        if not np.isfinite(out).all() or not np.isfinite(repeat).all():
++            raise RuntimeError('Non-finite ZWM features')
++        if not np.allclose(out, repeat, rtol=1e-3, atol=1e-4):
++            raise RuntimeError('Repeated ZWM inference is not numerically stable')
++        print(json.dumps({'model_ref':bc['model_ref'],'layer':bc['layer'],
++                          'feature_shape':list(out.shape),'mode':'one_image',
++                          'finite':True,'repeat_close':True}))
++    finally:
++        extractor.close()
++
++if __name__=='__main__':
++    main()
+diff --git a/transformer_model/train.py b/transformer_model/train.py
+new file mode 100644
+index 0000000..74a2f7d
+--- /dev/null
++++ b/transformer_model/train.py
+@@ -0,0 +1,324 @@
++"""Frozen ZWM -> masked TVSD ridge, using the existing RunRegistry.
++
++This is an independent Python-process entrypoint. Run it in ZWM's Python 3.10
++runtime; Sinz's Python 3.9 and optimizer implementation are unaffected.
++"""
++from __future__ import annotations
++import argparse
++from datetime import datetime, timezone
++import hashlib
++import json
++import os
++from pathlib import Path
++import sys
++import tempfile
++import traceback
++
++import numpy as np
++import pandas as pd
++import torch
++from PIL import Image, ImageOps
++
++from sinz_model.analysis import per_neuron_masked_pearson, summarize_correlations
++from sinz_model.orchestrator import RunRegistry
++from sinz_model.tvsd_data import TVSDTrainingBundle
++from sinz_model.runtime import config_sha256, sha256_file
++from .ridge import fit_masked_ridge_cv, fit_masked_ridge_cv_reference
++
++
++def _hash_json(obj):
++    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(',',':')).encode()).hexdigest()
++
++
++def _images_index(df):
++    """One image path per unique stimulus, independent of session/animal."""
++    paths = {}
++    for stimulus, rel in zip(df.stimulus_id, df.image_relative_path):
++        rel = str(rel)
++        if stimulus in paths and paths[stimulus] != rel:
++            raise ValueError(f'Conflicting paths for stimulus {stimulus}')
++        paths[stimulus] = rel
++    return dict(sorted(paths.items()))
++
++
++def _safe_image(root:Path, relative:str):
++    rel = Path(relative)
++    if rel.is_absolute() or not rel.parts or '..' in rel.parts:
++        raise ValueError(f'Unsafe image path: {relative}')
++    path = (root/rel).resolve()
++    if not path.is_relative_to(root.resolve()):
++        raise ValueError(f'Image escapes image root: {relative}')
++    return path
++
++
++def extract_cached_features(index, cfg, cache_dir:Path, extractor):
++    """Unique-image feature cache; fully validated before reuse.
++
++    Caches features only (never responses), keyed by model/input/split identity.
++    Neither val nor test observations participate in readout fitting.
++    """
++    bc = cfg['model']['backbone']
++    root=Path(cfg['data']['image_root'])
++    file_stats={}
++    for stimulus, relative in index.items():
++        path=_safe_image(root,relative)
++        st=path.stat()
++        file_stats[stimulus]=(st.st_size,st.st_mtime_ns)
++    spec = {
++        'source_files':file_stats, 'extractor_version':1,
++        'cache_chunk_size':int(bc.get('cache_chunk_size',256)),
++        'model_ref':bc['model_ref'], 'checkpoint_sha256':sha256_file(str(Path(bc['repo_root'])/'out'/bc['model_ref'])),
++        'layer':bc['layer'], 'pooling':bc.get('pooling','mean'), 'forward_mode':'one_image',
++        'input_mode':bc.get('input_mode','grayscale_rgb'), 'image_root':str(Path(cfg['data']['image_root']).resolve()),
++        'images':index,
++    }
++    key = _hash_json(spec)
++    cache_dir.mkdir(parents=True,exist_ok=True)
++    cache_path = cache_dir / f'{key}.npz'
++    stimuli = list(index)
++    if cache_path.is_file():
++        with np.load(cache_path, allow_pickle=False) as dat:
++            ids = dat['stimulus_ids'].astype(str).tolist()
++            vectors = dat['features']
++            if ids != stimuli or vectors.ndim != 2 or not np.isfinite(vectors).all():
++                raise RuntimeError('Feature cache corrupt or stale')
++            return dict(zip(ids, vectors)), cache_path
++    if extractor is None:
++        raise ValueError('Feature extractor required on cache miss')
++    # Persist completed chunks separately; a PBS timeout does not discard hours
++    # of inference. A final consolidated NPZ is written only after all chunks.
++    chunk_size=int(bc.get('cache_chunk_size',256))
++    if chunk_size < 1:
++        raise ValueError('cache_chunk_size must be positive')
++    part_dir=cache_dir/key
++    part_dir.mkdir(exist_ok=True)
++    vectors=[]
++    for start in range(0,len(stimuli),chunk_size):
++        names=stimuli[start:start+chunk_size]
++        part_path=part_dir/f'{start:07d}.npz'
++        if part_path.is_file():
++            with np.load(part_path,allow_pickle=False) as part:
++                ids=part['stimulus_ids'].astype(str).tolist()
++                subset=part['features']
++                if (ids!=names or subset.ndim!=2 or len(subset)!=len(names) or
++                        not np.isfinite(subset).all()):
++                    raise RuntimeError(f'Corrupt feature chunk {part_path}')
++            if vectors and subset.shape[1]!=vectors[0].shape[0]:
++                raise RuntimeError('Feature width changed between cached chunks')
++            vectors.extend(subset)
++            continue
++        batch=[]
++        for stimulus in names:
++            with Image.open(_safe_image(root,index[stimulus])) as file:
++                frame=file.convert('RGB')
++                if bc.get('input_mode','grayscale_rgb')=='grayscale_rgb':
++                    frame=ImageOps.grayscale(frame).convert('RGB')
++                elif bc.get('input_mode')!='rgb':
++                    raise ValueError('input_mode must be rgb or grayscale_rgb')
++                features=np.asarray(extractor.extract(frame),dtype=np.float32)
++            if features.ndim!=2 or features.shape[0]!=1 or not np.isfinite(features).all():
++                raise ValueError(f'Bad backbone features for {stimulus}')
++            if (batch and features.shape[1]!=batch[0].shape[0]) or (vectors and features.shape[1]!=vectors[0].shape[0]):
++                raise ValueError(f'Feature width changed at {stimulus}')
++            batch.append(features[0])
++        subset=np.stack(batch)
++        with tempfile.NamedTemporaryFile(dir=part_dir,suffix='.npz',delete=False) as handle:
++            temp=Path(handle.name)
++            try:
++                np.savez_compressed(handle,stimulus_ids=np.asarray(names,dtype=str),features=subset)
++            except BaseException:
++                temp.unlink(missing_ok=True)
++                raise
++        temp.replace(part_path)
++        vectors.extend(subset)
++        print(f'Extracted or restored {len(vectors)}/{len(stimuli)} images',flush=True)
++    matrix=np.stack(vectors)
++    with tempfile.NamedTemporaryFile(dir=cache_dir,suffix='.npz',delete=False) as handle:
++        tmp=Path(handle.name)
++        try:
++            np.savez_compressed(handle,stimulus_ids=np.asarray(stimuli,dtype=str),features=matrix)
++        except BaseException:
++            tmp.unlink(missing_ok=True)
++            raise
++    tmp.replace(cache_path)
++    return dict(zip(stimuli,matrix)), cache_path
++
++
++def _neuron_order(cfg, bundle):
++    df=pd.read_csv(Path(cfg['data']['root'])/'neuron_index.csv')
++    ids=[]
++    for animal in ('F','N'):
++        rows=df.loc[df.animal.eq(animal)].sort_values('neuron_index')
++        if rows.neuron_index.astype(int).tolist()!=list(range(bundle.widths[animal])):
++            raise ValueError(f'Neuron index is not contiguous for {animal}')
++        ids.extend(rows.neuron_id.astype(str).tolist())
++    if len(ids)!=cfg['model']['readout']['outdims']:
++        raise ValueError('Neurons do not match model readout')
++    if len(set(ids))!=len(ids) or any(not v or v=='nan' for v in ids):
++        raise ValueError('Neuron IDs must be present and globally unique')
++    return ids
++
++
++def _restart_ridge_run(reg, run_id, candidate_id, cfg, bundle):
++    """Retry a failed/preempted ridge fit in-place, retaining its provenance.
++
++    Unlike SGD, ridge has no mid-epoch checkpoint to resume. Cached backbone
++    features survive and make re-fitting cheap. The unique registry run row and
++    its original git, environment and dataset records must not be replaced.
++    """
++    previous=reg.get_run(str(run_id))
++    if (previous['candidate_id']!=str(candidate_id) or
++            int(previous['member_index'])!=0):
++        raise ValueError('Ridge retry candidate/member mismatch')
++    if previous['status'] not in ('running','failed'):
++        raise ValueError('Only incomplete ridge runs can be retried')
++    if (previous['config_sha256']!=config_sha256(cfg) or
++            previous['dataset_fingerprint']!=bundle.fingerprint or
++            previous['split_sha256']!=bundle.split.sha256):
++        raise ValueError('Ridge retry refused: config, dataset or split changed')
++    run_dir=Path(previous['run_dir'])
++    if not run_dir.is_dir():
++        raise FileNotFoundError(f'Ridge run directory missing: {run_dir}')
++    history_path=run_dir/'ridge_retry_history.json'
++    history=json.loads(history_path.read_text()) if history_path.exists() else []
++    if not isinstance(history,list):
++        raise ValueError('Invalid ridge retry history')
++    history.append({'retried_at_utc':datetime.now(timezone.utc).isoformat(),
++                    'previous_status':previous['status'], 'previous_error':previous['error'],
++                    'command':' '.join(sys.argv)})
++    pending=history_path.with_name(history_path.name+f'.tmp.{os.getpid()}')
++    try:
++        pending.write_text(json.dumps(history,indent=2)+'\n')
++        pending.replace(history_path)
++    finally:
++        pending.unlink(missing_ok=True)
++    # Incomplete fit metrics/checkpoint rows cannot leak into this attempt.
++    # This leaves the original run, parameters, provenance and cached features.
++    with reg.connect() as con:
++        for table in ('epochs','metrics','checkpoints','artifacts'):
++            con.execute(f'DELETE FROM {table} WHERE run_id=?',(run_id,))
++        con.execute('''UPDATE runs SET status='running', finished_at_utc=NULL,
++                       error=NULL WHERE run_id=?''',(run_id,))
++        con.execute('''UPDATE candidates SET status='running', finished_at_utc=NULL
++                       WHERE candidate_id=?''',(candidate_id,))
++    reg.log_artifact(run_id,'ridge_retry_history',str(history_path))
++    return {'run_id':str(run_id), 'run_dir':str(run_dir)}
++
++
++def train_ridge_member(cfg, member_index, candidate_id, *, evaluate_test=False, extractor=None,
++                       resume_run_id=None):
++    if cfg['model'].get('family')!='transformer_neural':
++        raise ValueError('Incorrect model family for frozen transformer training')
++    if cfg.get('training',{}).get('strategy')!='frozen_ridge':
++        raise NotImplementedError('Only training.strategy=frozen_ridge is implemented')
++    if int(member_index)!=0:
++        raise ValueError('Frozen ridge currently has one deterministic member: member_index=0')
++    if evaluate_test:
++        raise NotImplementedError('Test evaluation must be an explicit post-selection operation')
++    bundle = TVSDTrainingBundle(cfg)
++    neuron_ids=_neuron_order(cfg,bundle)
++    reg=RunRegistry(cfg['project']['sqlite_path'])
++    reg.initialize()
++    bc=cfg['model']['backbone']
++    if bc.get('forward_mode','one_image')!='one_image':
++        raise NotImplementedError('Only upstream ZWM one_image inference is supported')
++    if bc.get('kind')!='zwm':
++        raise NotImplementedError('Only ZWM is integrated; V-JEPA2 requires its own image adapter')
++    if resume_run_id is None:
++        run=reg.start_run(candidate_id,0,' '.join(sys.argv),
++                          {'root':int(cfg.get('training',{}).get('seed',8000))},
++                          bundle.fingerprint,bundle.split.sha256,bundle.mapping,cfg=cfg,
++                          notes='frozen ZWM features; per-neuron masked ridge')
++    else:
++        run=_restart_ridge_run(reg,resume_run_id,candidate_id,cfg,bundle)
++    run_id=run['run_id']; run_dir=Path(run['run_dir'])
++    try:
++        if extractor is None:
++            from .backbones import ZWMFeatures
++            extractor=ZWMFeatures(bc['model_ref'],repo_root=bc['repo_root'],
++                                  layer=bc['layer'],pooling=bc.get('pooling','mean'))
++        # No test images or responses: fit and validate on the frozen train/val only.
++        unique = _images_index(bundle.full.rows)
++        cache_base=Path(cfg['project'].get('feature_cache_root', str(run_dir/'features')))
++        lookup, cache_path=extract_cached_features(unique,cfg,cache_base,extractor)
++        df=bundle.full.rows
++        X=np.stack([lookup[s] for s in df.stimulus_id])
++        train_idx=np.flatnonzero(df.partition.eq('train').to_numpy())
++        val_idx=np.flatnonzero(df.partition.eq('val').to_numpy())
++        if not len(train_idx) or not len(val_idx):
++            raise ValueError('Frozen TVSD partitions are empty')
++        if set(df.stimulus_id.iloc[train_idx]) & set(df.stimulus_id.iloc[val_idx]):
++            raise ValueError('Image identity leakage across train and val')
++        rc=cfg['ridge']
++        solver=rc.get('solver','spectral')
++        if solver not in ('spectral','sklearn_reference'):
++            raise ValueError('ridge.solver must be spectral or sklearn_reference')
++        fit_fn=(fit_masked_ridge_cv if solver=='spectral' else fit_masked_ridge_cv_reference)
++        fit=fit_fn(X,bundle.full.responses,bundle.full.mask,
++                                train_indices=train_idx,groups=df.stimulus_id.to_numpy(),
++                                alphas=tuple(rc['alphas']),cv_folds=int(rc['cv_folds']))
++        with torch.inference_mode():
++            prediction=fit.readout(torch.from_numpy(X[val_idx])).cpu().numpy()
++        corr=per_neuron_masked_pearson(prediction,bundle.full.responses[val_idx],bundle.full.mask[val_idx])
++        summary=summarize_correlations(corr)
++        if summary['n_valid']<=0 or not np.isfinite(summary['mean']):
++            raise ValueError('No valid validation correlations')
++        cv_errors=-fit.cv_scores[np.isfinite(fit.cv_scores)]
++        if len(cv_errors):
++            reg.log_metric(run_id,'train','ridge_cv_mse','mean',float(cv_errors.mean()))
++        reg.log_epoch(run_id,0,'frozen_ridge',float('nan'),
++                      float('nan'),summary['mean'],summary['median'],0.)
++        for neuron_index,value in enumerate(corr):
++            if np.isfinite(value):
++                reg.log_metric(run_id,'val','pearson','neuron',float(value),neuron_id=neuron_index)
++        reg.log_metric(run_id,'val','pearson','mean',summary['mean'])
++        reg.log_metric(run_id,'val','pearson','median',summary['median'])
++        # Fitted is distinct from a neuron with a finite validation score.
++        # Unfitted neurons retain NaN intercepts and must be masked downstream.
++        state={'readout_state_dict':fit.readout.state_dict(),
++               'neuron_ids':neuron_ids,'alpha_by_neuron':torch.as_tensor(fit.alphas,dtype=torch.float32),
++               'cv_score_by_neuron':torch.as_tensor(fit.cv_scores,dtype=torch.float32),'valid_train_counts':torch.as_tensor(fit.valid_train_counts,dtype=torch.int64),
++               'valid_neuron_mask':torch.as_tensor(fit.valid_neuron_mask,dtype=torch.bool),
++               'feature_cache_key':cache_path.stem,'validation':summary}
++        checkpoint_dir=run_dir/'checkpoints'; checkpoint_dir.mkdir(exist_ok=True)
++        checkpoint=checkpoint_dir/'best.pt'
++        torch.save(state,checkpoint)
++        from sinz_model.runtime import hash_state_dict
++        reg.log_checkpoint(run_id,0,'frozen_ridge',str(checkpoint),
++                           sha256_file(str(checkpoint)),hash_state_dict(fit.readout.state_dict()),True)
++        reg.log_artifact(run_id,'feature_cache',str(cache_path))
++        reg.log_artifact(run_id,'readout',str(checkpoint))
++        with (run_dir/'validation.json').open('w') as f:
++            json.dump({'summary':summary,'neuron_ids':neuron_ids,'alpha':[float(v) if np.isfinite(v) else None for v in fit.alphas],
++                       'cv_score':[float(v) if np.isfinite(v) else None for v in fit.cv_scores],
++                       'valid_train_counts':fit.valid_train_counts.tolist(),
++                       'valid_neuron_mask':fit.valid_neuron_mask.tolist()},
++                      f,indent=2,allow_nan=False)
++        reg.finish_run(run_id,'completed')
++        print('TVSD_TRANSFORMER_RUN_ID='+run_id,flush=True)
++        return run_id
++    except BaseException:
++        reg.finish_run(run_id,'failed',error=traceback.format_exc())
++        raise
++    finally:
++        if extractor is not None and hasattr(extractor,'close'):
++            extractor.close()
++
++
++def main():
++    p=argparse.ArgumentParser()
++    p.add_argument('--config',required=True,help='Resolved execution config JSON')
++    p.add_argument('--candidate-id',required=True)
++    p.add_argument('--member',type=int,default=0)
++    p.add_argument('--resume-run-id',default=None)
++    p.add_argument('--result-file',required=True)
++    p.add_argument('--evaluate-test',action='store_true')
++    a=p.parse_args()
++    cfg=json.loads(Path(a.config).read_text())
++    run_id=train_ridge_member(cfg,a.member,a.candidate_id,evaluate_test=a.evaluate_test,
++                              resume_run_id=a.resume_run_id)
++    dest=Path(a.result_file)
++    dest.write_text(json.dumps({'run_id':run_id})+'\n')
++
++if __name__=='__main__':
++    main()

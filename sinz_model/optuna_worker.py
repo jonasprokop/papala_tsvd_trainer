@@ -104,6 +104,13 @@ def execute(experiment: Path, batch: str, index: int, worker_db: Path):
     if trial_dir.parent != root / 'trials':
         raise ValueError('Trial directory outside study')
     cfg = json.loads((trial_dir / 'config.json').read_text())
+    if cfg.get('model',{}).get('family') == 'transformer_neural':
+        meta_check=json.loads((root / 'experiment.json').read_text())
+        if cfg.get('training',{}).get('strategy') != 'frozen_ridge':
+            raise NotImplementedError('Only frozen_ridge is currently available for ZWM')
+        if (meta_check.get('prune') or meta_check.get('train_batches') is not None
+                or meta_check.get('val_batches') is not None):
+            raise ValueError('Frozen ridge requires pruning=False and unlimited train/val batches')
     if _digest(cfg) != record['config_sha256']:
         raise RuntimeError('Frozen trial config modified')
     result_path = trial_dir / 'result.json'
@@ -164,9 +171,13 @@ def execute(experiment: Path, batch: str, index: int, worker_db: Path):
                 if runs and runs[0]['status'] == 'completed':
                     pass
                 elif runs:
-                    checkpoint = Path(runs[0]['run_dir']) / 'checkpoints' / 'latest.pt'
-                    if not checkpoint.exists():
-                        raise RuntimeError('Cannot resume worker: latest.pt missing')
+                    if not (cfg.get('model', {}).get('family') == 'transformer_neural'
+                            and cfg.get('training', {}).get('strategy') == 'frozen_ridge'):
+                        checkpoint = Path(runs[0]['run_dir']) / 'checkpoints' / 'latest.pt'
+                        if not checkpoint.exists():
+                            raise RuntimeError('Cannot resume worker: latest.pt missing')
+                    # Ridge restarts the fit under the same run ID. The image
+                    # feature cache survives; no SGD checkpoint is expected.
                     train_member(cfg, 0, candidate_id=candidate_id, resume_run_id=run_id,
                                  evaluate_test=False, limit_train_batches=meta['train_batches'],
                                  limit_val_batches=meta['val_batches'], on_epoch_end=report)

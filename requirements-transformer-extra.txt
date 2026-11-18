@@ -1,0 +1,6 @@
+# Install IN the separate Python 3.10 / ZWM environment, after upstream ZWM.
+# ZWM upstream owns its own torch, CUDA, and inference dependency versions.
+scikit-learn>=1.4,<2
+pandas>=2.0,<3
+PyYAML>=6,<7
+optuna>=4.8,<5  # only needed when ZWM is used as an Optuna PBS worker

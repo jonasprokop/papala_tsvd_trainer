@@ -167,6 +167,20 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
                  resume_run_id:Optional[str]=None,dry_run=False,limit_train_batches=None,
                  limit_val_batches=None,evaluate_test=True,
                  on_epoch_end:Optional[Callable[[int,float],bool]]=None)->str:
+    family = cfg.get("model", {}).get("family", "sinz")
+    strategy = cfg.get("training", {}).get("strategy", "gradient" if family == "sinz" else None)
+    if family == "transformer_neural":
+        if strategy != "frozen_ridge":
+            raise NotImplementedError(f"Unsupported transformer training strategy: {strategy!r}")
+        from .transformer_bridge import train_transformer_member
+        return train_transformer_member(
+            cfg, member_index, candidate_id, notes=notes, resume_run_id=resume_run_id,
+            dry_run=dry_run, limit_train_batches=limit_train_batches,
+            limit_val_batches=limit_val_batches, evaluate_test=evaluate_test,
+            on_epoch_end=on_epoch_end,
+        )
+    if family != "sinz" or strategy != "gradient":
+        raise NotImplementedError(f"Unsupported training combination: {family!r}/{strategy!r}")
     member_index=int(member_index); seed=int(cfg["training"]["member_seeds"][member_index])
     seeds=seed_everything(seed,cfg); dc=cfg["data"]
     is_tvsd = dc.get("kind") == "tvsd"

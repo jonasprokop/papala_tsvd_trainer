@@ -277,6 +277,8 @@ def run_plan(args) -> None:
     reg.initialize()
     parent = _resolve_parent(reg, str(root), args.workflow_id, args.parent_candidate_id)
     base = reg.get_candidate_config(parent["candidate_id"])
+    if base.get("model", {}).get("family", "sinz") != "sinz":
+        raise NotImplementedError("SWEEP is SGD/Sinz-only; frozen ZWM uses launch/Optuna")
     grid = _load_space(args.space)
     plan = make_plan(base, grid, args.max_candidates)
     n_members = int(base["training"]["ensemble_members"])
@@ -306,6 +308,8 @@ def run_sweep(args) -> None:
     parent = _resolve_parent(reg, str(root), args.workflow_id, args.parent_candidate_id)
     workflow_id = str(parent["workflow_id"])
     base = reg.get_candidate_config(parent["candidate_id"])
+    if base.get("model", {}).get("family", "sinz") != "sinz":
+        raise NotImplementedError("SWEEP is SGD/Sinz-only; frozen ZWM uses launch/Optuna")
     grid = _load_space(args.space)
     plan = make_plan(base, grid, args.max_candidates)
 

@@ -190,6 +190,10 @@ def _prepare_base_config(
     epochs: Optional[int],
 ) -> Dict[str, Any]:
     cfg = load_config(config_path)
+    if cfg.get("model", {}).get("family", "sinz") != "sinz":
+        raise NotImplementedError(
+            "SEARCH is an SGD/Sinz workflow; use ZWM launch or explicit Optuna batches"
+        )
     root = Path(output_root).resolve()
     cfg["project"]["output_root"] = str(root / "runs")
     cfg["project"]["sqlite_path"] = str(root / "results.sqlite")

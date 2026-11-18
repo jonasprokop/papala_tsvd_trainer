@@ -10,6 +10,7 @@ from pathlib import Path
 import optuna
 from sinz_model import optuna_batch as ob
 from sinz_model.orchestrator import RunRegistry
+from sinz_model.owner_lock import break_owner_lock
 
 BASE = Path(__file__).resolve().parents[1]
 
@@ -33,6 +34,19 @@ class BatchTest(unittest.TestCase):
     def prepare(self, n=4):
         ob.prepare(argparse.Namespace(root=str(self.root), trials=n, data_root=None, image_root=None))
         return ob._read(ob._active(self.root))
+
+    def test_study_lock_refuses_live_owner_and_is_recoverable_when_dead(self):
+        from unittest.mock import patch
+        with ob._lock(self.root):
+            with self.assertRaisesRegex(RuntimeError, 'still alive'):
+                break_owner_lock(self.root / '.coordinator.lock')
+        lock = self.root / '.coordinator.lock'
+        lock.mkdir()
+        import socket
+        (lock / 'owner').write_text(f'host={socket.gethostname()} pid=999999999\n')
+        with patch('sinz_model.owner_lock.os.kill', side_effect=ProcessLookupError):
+            ob.break_study_lock(argparse.Namespace(root=str(self.root)))
+        self.assertFalse(lock.exists())
 
     def result(self, record, scores=(0.15, 0.3), status='completed'):
         trial_dir = Path(record['trial_dir'])
@@ -134,7 +148,8 @@ class BatchTest(unittest.TestCase):
         with patch('sinz_model.optuna_batch.subprocess.run', side_effect=[
             Job('123[].pbs-m1.metacentrum.cz\n'), Job('124.pbs-m1.metacentrum.cz\n'),
         ]) as qsub:
-            ob.submit(argparse.Namespace(root=str(self.root), concurrency=4, dry_run=False))
+            ob.submit(argparse.Namespace(root=str(self.root), concurrency=4,
+                                         dry_run=False,execute=True,schedule_collector=True))
         self.assertEqual(qsub.call_count, 2)
         arr = qsub.call_args_list[0].args[0]
         collect = qsub.call_args_list[1].args[0]
@@ -143,6 +158,21 @@ class BatchTest(unittest.TestCase):
         manifest = ob._read(ob._active(self.root))
         self.assertEqual(manifest['collector_job_id'], '124.pbs-m1.metacentrum.cz')
         self.assertFalse(manifest['submission_pending'])
+
+    def test_submit_previews_by_default_and_requires_explicit_scheduler_opt_in(self):
+        from unittest.mock import patch
+        self.prepare(4)
+        with patch('sinz_model.optuna_batch.subprocess.run') as qsub:
+            ob.submit(argparse.Namespace(root=str(self.root), concurrency=4,dry_run=False))
+            qsub.assert_not_called()
+        self.assertIsNone(ob._read(ob._active(self.root))['array_job_id'])
+        class Job:
+            stdout='125[].pbs-m1.metacentrum.cz\n'
+        with patch('sinz_model.optuna_batch.subprocess.run',return_value=Job()) as qsub:
+            ob.submit(argparse.Namespace(root=str(self.root), concurrency=2,
+                                         dry_run=False,execute=True,schedule_collector=False))
+            self.assertEqual(qsub.call_count,1)  # Only the GPU array, no extra PBS node.
+        self.assertIsNone(ob._read(ob._active(self.root))['collector_job_id'])
 
     def test_invalid_search_and_submission_dry_run(self):
         batch = self.prepare(2)
@@ -155,3 +185,35 @@ class BatchTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_frozen_ridge_optuna_prepare_uses_single_registry(tmp_path):
+    from sinz_model import optuna_batch as ob
+    import argparse, json, yaml
+    root = tmp_path / 'optuna' / 'ridge'
+    repo = Path(__file__).resolve().parents[1]
+    space = tmp_path / 'ridge_space.yaml'
+    space.write_text(yaml.safe_dump({'search': {'model.backbone.layer': {
+        'type': 'choice', 'values': ['transformer.h.20', 'transformer.h.22']}}}))
+    params = dict(root=str(root), project_db=None,
+        config=str(repo / 'configs/tvsd_zwm_ridge.yaml'), space=str(space),
+        name='ridge-test', seed=8, member_seed=8000, epochs=None, phase1_epochs=None,
+        train_batches=None, val_batches=None, prune=False,
+        pruner_startup_trials=2, pruner_warmup_steps=0)
+    ob.initialize(argparse.Namespace(**params))
+    meta = ob._read(root / 'experiment.json')
+    assert Path(meta['project_db']) == tmp_path / 'results' / 'results.sqlite'
+    ob.prepare(argparse.Namespace(root=str(root), trials=2, data_root=None, image_root=None))
+    manifest = ob._read(ob._active(root))
+    assert len(manifest['records']) == 2
+    configs = [ob._read(Path(record['trial_dir']) / 'config.json')
+               for record in manifest['records']]
+    assert all(cfg['training']['strategy'] == 'frozen_ridge' for cfg in configs)
+    assert all('total_epochs' not in cfg['training'] for cfg in configs)
+    assert all(cfg['project']['sqlite_path'] == '/worker/worker.sqlite' for cfg in configs)
+    for key, val in (('prune', True), ('train_batches', 2), ('epochs', 2)):
+        bad = dict(params)
+        bad['root'] = str(tmp_path / 'optuna' / ('bad_' + key))
+        bad[key] = val
+        with __import__('pytest').raises(ValueError):
+            ob.initialize(argparse.Namespace(**bad))
