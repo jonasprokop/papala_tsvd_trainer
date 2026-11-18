@@ -1,12 +1,46 @@
 # TVSD ZWM: one registry, one Singularity image
 
-The PBS launcher chooses one of two Python prefixes inside `sinz-base.sif`.
-Bind the Brno2 root both at its absolute host path and at `/mnt/tvsd`:
+The PBS launcher chooses one of two Python prefixes inside `tvsd-bookworm.sif`.
+Bind Brno2 **only** at `/mnt/tvsd`; self-binding `"$ROOT:$ROOT"` fails on
+MetaCentrum. The original `sinz-base.sif` remains untouched for rollback:
 
 | family | interpreter | strategy |
 |---|---|---|
 | `sinz` | `/mnt/tvsd/envs/tvsd-py39/bin/python` | `gradient` (existing) |
-| `transformer_neural` | `/storage/brno2/home/jonas_prokop/visual_models/envs/zwm-py310/bin/python` | `frozen_ridge` |
+| `transformer_neural` | `/mnt/tvsd/envs/zwm-py310/bin/python` | `frozen_ridge` |
+
+## Build and stage the modern image
+
+Run the manually triggered GitHub Actions workflow
+`.github/workflows/metacentrum-image.yml`. It publishes the image from
+`Dockerfile.metacentrum` to GHCR without building on MetaCentrum. The base is
+Debian Bookworm (glibc 2.36), with the Sinz Python 3.9 dependencies installed.
+No ZWM code, checkpoints or data are baked into the image.
+
+After a successful build, pull **once** during a small allocated CPU job; use
+the version-specific `bookworm-<git SHA>` tag shown in Actions:
+
+```bash
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+singularity pull "$ROOT/containers/tvsd-bookworm.sif" \
+  docker://ghcr.io/jonasprokop/papala_tsvd_trainer:bookworm-<git-sha>
+singularity exec "$ROOT/containers/tvsd-bookworm.sif" getconf GNU_LIBC_VERSION
+```
+
+GHCR images are initially private; allow a public package download or arrange
+registry authentication before pulling. Do not replace `sinz-base.sif`.
+
+First check the **existing** Python 3.9 prefix against the new SIF. It was
+created with `/usr/bin/python3.9`, which the new image supplies as an alias.
+The image's build check does not prove that every old venv wheel imports:
+
+```bash
+CODE="$ROOT/code/papala_tsvd_trainer"
+singularity exec --bind "$ROOT:/mnt/tvsd" --bind "$CODE:/project" \
+  "$ROOT/containers/tvsd-bookworm.sif" \
+  /mnt/tvsd/envs/tvsd-py39/bin/python -c \
+  'import torch, transformers, sklearn, optuna, yaml; print(torch.__version__)'
+```
 
 Create an independent Python 3.10 prefix with Mamba/Conda on an allocated CPU
 node. A Python 3.9 `venv` cannot supply Python 3.10:
@@ -17,9 +51,10 @@ CODE="$ROOT/code/papala_tsvd_trainer"
 module add micromamba
 micromamba create --prefix "$ROOT/envs/zwm-py310" -c conda-forge python=3.10 pip -y
 # Clone/pin https://github.com/awwkl/ZWM under "$ROOT/code/ZWM" first.
-singularity exec --bind "$ROOT:$ROOT" --bind "$CODE:/project" \
-  "$ROOT/containers/sinz-base.sif" \
-  "$ROOT/envs/zwm-py310/bin/python" -m pip install -e "$ROOT/code/ZWM" \
+singularity exec --bind "$ROOT:/mnt/tvsd" --bind "$CODE:/project" \
+  "$ROOT/containers/tvsd-bookworm.sif" \
+  /mnt/tvsd/envs/zwm-py310/bin/python -m pip install \
+     -e /mnt/tvsd/code/ZWM \
      -r /project/requirements-transformer-extra.txt
 ```
 
@@ -39,9 +74,9 @@ Check the paths before submitting a job:
 ```bash
 ROOT=/storage/brno2/home/jonas_prokop/visual_models
 CODE="$ROOT/code/papala_tsvd_trainer"
-test -d "$CODE" && test -f "$ROOT/containers/sinz-base.sif" \
+test -d "$CODE" && test -f "$ROOT/containers/tvsd-bookworm.sif" \
   && test -x "$ROOT/envs/zwm-py310/bin/python" \
-  && test -x "$ROOT/envs/tvsd-py39/bin/python"
+  && test -L "$ROOT/envs/tvsd-py39/bin/python"
 ```
 
 PBS uses `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`. Pre-fill the ZWM
@@ -49,15 +84,14 @@ checkpoint and Hugging Face cache in a separate allocated-node warm-up if
 required; workers intentionally cannot download missing assets.
 
 Run one real-image ZWM smoke test under Python 3.10 before training, through the
-same `sinz-base.sif` with binds `"$CODE:/project"`, `"$ROOT:/mnt/tvsd"`, and
-`"$ROOT:$ROOT"`:
+same `tvsd-bookworm.sif` with binds `"$CODE:/project"`, `"$ROOT:/mnt/tvsd"`:
 
 ```bash
 # Run on an allocated GPU compute node (not the login node).
 singularity exec --nv \
-  --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" --bind "$ROOT:$ROOT" \
-  "$ROOT/containers/sinz-base.sif" \
-  "$ROOT/envs/zwm-py310/bin/python" -m transformer_model.smoke \
+  --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
+  "$ROOT/containers/tvsd-bookworm.sif" \
+  /mnt/tvsd/envs/zwm-py310/bin/python -m transformer_model.smoke \
   --config /project/configs/tvsd_zwm_ridge.yaml \
   --image /mnt/tvsd/data/assets/THINGS/ACTUAL_IMAGE.jpg
 ```
@@ -81,7 +115,7 @@ CODE="$ROOT/code/papala_tsvd_trainer"
 cd "$CODE"
 export SINGULARITYENV_PYTHONPATH=/project
 singularity exec --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
-  --bind "$ROOT:$ROOT" "$ROOT/containers/sinz-base.sif" \
+  "$ROOT/containers/tvsd-bookworm.sif" \
   /mnt/tvsd/envs/tvsd-py39/bin/python -m sinz_model.registry_handoff collect \
   --project-db /mnt/tvsd/results/results.sqlite \
   --worker-db "/mnt/tvsd/results/zwm_handoffs/$CANDIDATE_ID/$PBS_JOBID.sqlite" \
@@ -98,7 +132,7 @@ dead on the *same host* where it was created:
 
 ```bash
 singularity exec --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
-  --bind "$ROOT:$ROOT" "$ROOT/containers/sinz-base.sif" \
+  "$ROOT/containers/tvsd-bookworm.sif" \
   /mnt/tvsd/envs/tvsd-py39/bin/python -m sinz_model.registry_handoff break-lock \
   --project-db /mnt/tvsd/results/results.sqlite
 ```

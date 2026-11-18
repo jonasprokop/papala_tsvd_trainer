@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.7
+# MetaCentrum's single runtime image. External Brno2 Python prefixes are
+# mounted at /mnt/tvsd/envs; source, datasets, and checkpoints stay outside.
+# The existing Dockerfile remains the Dyscal development image.
+FROM python:3.9.25-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONNOUSERSITE=1
+
+# The pre-existing tvsd-py39 venv was created with home=/usr/bin and a
+# /usr/bin/python3.9 link. Retain its interpreter path when replacing the SIF.
+RUN ln -s /usr/local/bin/python3.9 /usr/bin/python3.9 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Sinz's verified 1.13/cu117 stack stays on Python 3.9. ZWM's torch 2.x
+# is installed only in the independent external Python 3.10 environment.
+RUN python3.9 -m pip install \
+      torch==1.13.1+cu117 torchvision==0.14.1+cu117 torchaudio==0.13.1 \
+      --extra-index-url https://download.pytorch.org/whl/cu117
+
+RUN python3.9 -m pip install \
+      numpy==1.22.4 scipy==1.13.1 scikit-learn==0.24.2 \
+      scikit-image==0.19.1 Pillow==10.4.0 pandas==2.2.3 h5py==3.10.0 \
+      transformers==4.35.2 huggingface-hub==0.27.1 \
+      safetensors==0.5.2 tokenizers==0.15.2 \
+      PyYAML==6.0.2 optuna==4.8.0 pytest==8.4.2 tqdm==4.61.2
+
+# Explicitly test the Python path expected by the existing Brno2 venv.
+RUN <<'SH'
+set -eu
+/usr/bin/python3.9 -m venv --system-site-packages /tmp/compat-py39
+sed -i 's|^home = .*|home = /usr/bin|' /tmp/compat-py39/pyvenv.cfg
+/tmp/compat-py39/bin/python - <<'PY'
+import ctypes
+import sys
+
+import optuna
+import sklearn
+import torch
+import transformers
+import yaml
+
+glibc = ctypes.CDLL('libc.so.6').gnu_get_libc_version
+glibc.restype = ctypes.c_char_p
+version = tuple(map(int, glibc().decode().split('.')))
+assert version >= (2, 28), version
+assert sys.version_info[:2] == (3, 9)
+assert torch.__version__ == '1.13.1+cu117', torch.__version__
+assert torch.version.cuda == '11.7', torch.version.cuda
+print('MetaCentrum base:', sys.version, glibc().decode(),
+      'torch', torch.__version__, 'optuna', optuna.__version__)
+PY
+rm -rf /tmp/compat-py39
+SH
+
+WORKDIR /project
+CMD ["bash"]

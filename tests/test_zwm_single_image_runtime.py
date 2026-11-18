@@ -44,11 +44,12 @@ def test_one_sif_two_python_prefixes():
     optuna=(root/'jobs/optuna_trial.pbs').read_text()
     zwm=(root/'jobs/zwm_train.pbs').read_text()
     cfg=(root/'configs/tvsd_zwm_ridge.yaml').read_text()
-    assert 'containers/sinz-base.sif' in zwm
-    assert 'containers/sinz-base.sif' in optuna
+    assert 'containers/tvsd-bookworm.sif' in zwm
+    assert 'containers/tvsd-bookworm.sif' in optuna
     assert 'envs/tvsd-py39/bin/python' in optuna
     assert 'envs/zwm-py310/bin/python' in optuna
     assert 'envs/zwm-py310/bin/python' in zwm
+    assert '/mnt/tvsd/envs/zwm-py310/bin/python' in cfg
     assert 'strategy: frozen_ridge' in cfg
     assert 'zwm.sif' not in optuna and 'ZWM_SIF' not in zwm
 
@@ -61,6 +62,13 @@ def test_metacentrum_paths_and_single_project_registry():
     for script in (zwm, optuna, collector):
         assert 'code/papala_tsvd_trainer' in script
         assert 'code/papala_tvsd_trainer' not in script
+        assert '--bind "$ROOT:$ROOT"' not in script
+        assert '--bind "$ROOT:/mnt/tvsd"' in script
+        assert 'containers/tvsd-bookworm.sif' in script
+    assert 'HOST_PYTHON=' in optuna
+    assert '[ -L "$HOST_PYTHON" ]' in optuna
+    assert 'SINGULARITYENV_PYTHONPATH="/project:/mnt/tvsd/code/ZWM"' in optuna
+    assert 'SINGULARITYENV_PYTHONPATH="/project:/mnt/tvsd/code/ZWM"' in zwm
     import yaml
     config = yaml.safe_load((root / 'configs/tvsd_zwm_ridge.yaml').read_text())
     assert config['project']['sqlite_path'] == config['project']['output_root'] + '/results.sqlite'

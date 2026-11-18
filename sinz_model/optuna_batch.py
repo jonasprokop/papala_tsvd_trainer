@@ -311,13 +311,13 @@ def prepare(args):
                 cfg['project'].update(
                     # Only worker-local SQLite is writable during training.
                     sqlite_path='/worker/worker.sqlite',
-                    # Persistent checkpoint/record paths remain valid on skirit.
-                    output_root=str(trial_dir / 'runs'),
-                    result_sheet_path=str(trial_dir / 'runs.csv'),
+                    # Persistent paths must use their container mount names.
+                    output_root=_mapped(trial_dir / 'runs', workspace),
+                    result_sheet_path=_mapped(trial_dir / 'runs.csv', workspace),
                 )
                 data_root = Path(args.data_root or workspace / 'data' / 'tvsd_waveform_aware_v1' / 'model_dataset').resolve()
-                cfg['data']['root'] = str(data_root)
-                cfg['data']['image_root'] = str(Path(args.image_root or workspace / 'data' / 'assets' / 'THINGS').resolve())
+                cfg['data']['root'] = _mapped(data_root, workspace)
+                cfg['data']['image_root'] = _mapped(Path(args.image_root or workspace / 'data' / 'assets' / 'THINGS'), workspace)
                 cfg['data']['preprocessing']['normalization_path'] = str(Path(cfg['data']['root']) / 'normalization.json')
                 cfg['data']['dataset_module_path'] = '/project/waveform_aware_tvsd_preprocessing/scripts/dataset.py'
                 if isinstance(cfg['training'].get('progress'), dict):

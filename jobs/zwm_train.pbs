@@ -6,19 +6,19 @@
 set -euo pipefail
 ROOT=/storage/brno2/home/jonas_prokop/visual_models
 CODE="$ROOT/code/papala_tsvd_trainer"
-SIF="$ROOT/containers/sinz-base.sif"
-PYTHON="$ROOT/envs/zwm-py310/bin/python"
+SIF="$ROOT/containers/tvsd-bookworm.sif"
+PYTHON=/mnt/tvsd/envs/zwm-py310/bin/python
 : "${CANDIDATE_ID:?Pass CANDIDATE_ID using qsub -v}"
 : "${PBS_JOBID:?Run through PBS}"
 : "${SCRATCHDIR:?requires scratch_local}"
-for item in "$SIF" "$PYTHON" "$ROOT/data/tvsd_waveform_aware_v1/model_dataset/dataset_info.json"; do
+for item in "$SIF" "$ROOT/envs/zwm-py310/bin/python" "$ROOT/data/tvsd_waveform_aware_v1/model_dataset/dataset_info.json"; do
   [ -f "$item" ] || { echo "Missing file: $item" >&2; exit 2; }
 done
 [ -d "$ROOT/code/ZWM" ] || { echo 'Missing upstream ZWM checkout' >&2; exit 2; }
 [ -d "$ROOT/data/assets/THINGS" ] || { echo 'Missing THINGS images' >&2; exit 2; }
 mkdir -p "$ROOT/logs" "$ROOT/results" "$ROOT/cache/huggingface" "$ROOT/cache/torch"
 exec > "$ROOT/logs/zwm.${PBS_JOBID}.log" 2>&1
-export SINGULARITYENV_PYTHONPATH="/project:$ROOT/code/ZWM"
+export SINGULARITYENV_PYTHONPATH="/project:/mnt/tvsd/code/ZWM"
 export SINGULARITYENV_PYTHONNOUSERSITE=1
 export SINGULARITYENV_PYTHONUNBUFFERED=1
 export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -65,12 +65,10 @@ on_term() {
   exit 143
 }
 trap on_term TERM
-# Host prefix stays visible under the SAME absolute path inside the container.
 set +e
 singularity exec --nv \
   --bind "$CODE:/project" \
   --bind "$ROOT:/mnt/tvsd" \
-  --bind "$ROOT:$ROOT" \
   --bind "$SCRATCHDIR:/worker" \
   "$SIF" "$PYTHON" -m transformer_model.launch \
     --sqlite-path /worker/zwm_worker.sqlite \

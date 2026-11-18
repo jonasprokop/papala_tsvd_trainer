@@ -35,6 +35,27 @@ class BatchTest(unittest.TestCase):
         ob.prepare(argparse.Namespace(root=str(self.root), trials=n, data_root=None, image_root=None))
         return ob._read(ob._active(self.root))
 
+    def test_worker_paths_resolve_inside_single_container_bind(self):
+        batch = self.prepare(1)
+        record = batch['records'][0]
+        trial_dir = Path(record['trial_dir'])
+        cfg = ob._read(trial_dir / 'config.json')
+        self.assertEqual(record['container_trial_dir'], ob._mapped(trial_dir, self.workspace))
+        self.assertEqual(cfg['project']['sqlite_path'], '/worker/worker.sqlite')
+        self.assertEqual(cfg['project']['output_root'],
+                         ob._mapped(trial_dir / 'runs', self.workspace))
+        self.assertEqual(cfg['project']['result_sheet_path'],
+                         ob._mapped(trial_dir / 'runs.csv', self.workspace))
+        self.assertEqual(cfg['data']['root'], ob._mapped(
+            self.workspace / 'data/tvsd_waveform_aware_v1/model_dataset', self.workspace))
+        self.assertEqual(cfg['data']['image_root'], ob._mapped(
+            self.workspace / 'data/assets/THINGS', self.workspace))
+        self.assertEqual(cfg['data']['preprocessing']['normalization_path'],
+                         cfg['data']['root'] + '/normalization.json')
+        for group in ('project', 'data'):
+            for key in ('output_root', 'result_sheet_path') if group == 'project' else ('root', 'image_root'):
+                self.assertTrue(cfg[group][key].startswith('/mnt/tvsd/'))
+
     def test_study_lock_refuses_live_owner_and_is_recoverable_when_dead(self):
         from unittest.mock import patch
         with ob._lock(self.root):

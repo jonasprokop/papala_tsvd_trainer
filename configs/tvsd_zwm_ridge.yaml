@@ -1,4 +1,4 @@
-# Single sinz-base.sif, with external Brno2 Python 3.9 and 3.10 prefixes.
+# Single modern SIF, with external Brno2 Python 3.9 and 3.10 prefixes.
 # Python 3.10 must be created and verified on MetaCentrum before use.
 project:
   name: tvsd-zwm-170m-ridge
@@ -7,7 +7,7 @@ project:
   result_sheet_path: /mnt/tvsd/results/runs.csv
   feature_cache_root: /mnt/tvsd/results/zwm_feature_cache
 runtime:
-  python_executable: /storage/brno2/home/jonas_prokop/visual_models/envs/zwm-py310/bin/python
+  python_executable: /mnt/tvsd/envs/zwm-py310/bin/python
 
 data:
   kind: tvsd

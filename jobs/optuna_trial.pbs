@@ -6,7 +6,7 @@
 set -euo pipefail
 ROOT=/storage/brno2/home/jonas_prokop/visual_models
 CODE="$ROOT/code/papala_tsvd_trainer"
-SIF="$ROOT/containers/sinz-base.sif"
+SIF="$ROOT/containers/tvsd-bookworm.sif"
 PYTHON=/mnt/tvsd/envs/tvsd-py39/bin/python
 : "${OPTUNA_EXPERIMENT:?qsub -v OPTUNA_EXPERIMENT=...}"
 : "${OPTUNA_BATCH:?qsub -v OPTUNA_BATCH=...}"
@@ -41,12 +41,18 @@ print(cfg.get('model',{}).get('family','sinz'))
 PYCONFIG
 )
 if [ "$FAMILY" = transformer_neural ]; then
-  PYTHON="$ROOT/envs/zwm-py310/bin/python"
+  PYTHON=/mnt/tvsd/envs/zwm-py310/bin/python
   [ -d "$ROOT/code/ZWM" ] || { echo 'Missing upstream ZWM checkout' >&2; exit 3; }
 elif [ "$FAMILY" != sinz ]; then
   echo "Unsupported model family $FAMILY" >&2; exit 3
 fi
-[ -f "$SIF" ] && [ -f "$PYTHON" ] || { echo "Missing image or Python: $SIF $PYTHON" >&2; exit 3; }
+# External interpreters are only resolvable inside the container. The old
+# Python 3.9 venv has a /usr/bin/python3.9 symlink that is dangling on the host.
+[ -f "$SIF" ] || { echo "Missing image: $SIF" >&2; exit 3; }
+HOST_PYTHON="$ROOT/${PYTHON#/mnt/tvsd/}"
+[ -L "$HOST_PYTHON" ] || [ -f "$HOST_PYTHON" ] || {
+  echo "Missing Python prefix: $HOST_PYTHON" >&2; exit 3;
+}
 printf 'FAMILY=%s IMAGE=%s PYTHON=%s\n' "$FAMILY" "$SIF" "$PYTHON"
 SEED="$TRIAL_DIR/worker_seed.sqlite"
 [ -f "$SEED" ] || { echo "Missing worker seed: $SEED" >&2; exit 3; }
@@ -89,7 +95,7 @@ if [ -f "$LOCK" ]; then
   printf 'Removed stale lock for completed PBS job %s\n' "$OLD_JOB"
 fi
 
-export SINGULARITYENV_PYTHONPATH="/project:$ROOT/code/ZWM"
+export SINGULARITYENV_PYTHONPATH="/project:/mnt/tvsd/code/ZWM"
 export SINGULARITYENV_PYTHONNOUSERSITE=1
 export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
 export SINGULARITYENV_HF_HUB_CACHE=/mnt/tvsd/cache/huggingface/hub
@@ -125,7 +131,6 @@ set +e
 singularity exec --nv \
   --bind "$CODE:/project" \
   --bind "$ROOT:/mnt/tvsd" \
-  --bind "$ROOT:$ROOT" \
   --bind "$SCRATCHDIR:/worker" \
   "$SIF" "$PYTHON" -m sinz_model.optuna_worker \
     --experiment "/mnt/tvsd/$REL" --batch "$OPTUNA_BATCH" \
