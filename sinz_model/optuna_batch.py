@@ -363,7 +363,7 @@ def submit(args):
             raise ValueError('concurrency must be 1..n')
         paths = Path(__file__).resolve().parents[1] / 'jobs'
         env = _pbs_env(root, manifest['batch'])
-        array = ['qsub', '-J', f'1-{n}', f'%{cap}', '-v', env, str(paths / 'optuna_trial.pbs')]
+        array = ['qsub', '-J', f'1-{n}%{cap}', '-v', env, str(paths / 'optuna_trial.pbs')]
         if args.dry_run or not getattr(args, 'execute', False):
             print('Array:', ' '.join(array))
             print('After the array ends, collect manually: python -m sinz_model.optuna_batch collect --root ' + str(root))

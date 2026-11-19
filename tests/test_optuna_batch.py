@@ -56,6 +56,29 @@ class BatchTest(unittest.TestCase):
             for key in ('output_root', 'result_sheet_path') if group == 'project' else ('root', 'image_root'):
                 self.assertTrue(cfg[group][key].startswith('/mnt/tvsd/'))
 
+    def test_eight_trials_jointly_sample_core_depth_and_readout_regularization(self):
+        focused = ob._space(BASE / 'configs/tvsd_optuna_depth_gamma_space.yaml',
+                            ob._read(self.root / 'base.json'))
+        self.assertEqual(set(focused), {
+            'model.core.stage1_blocks', 'training.loss.gamma_readout'
+        })
+        batch = self.prepare(8)
+        self.assertEqual(len(batch['records']), 8)
+        for record in batch['records']:
+            params = record['params']
+            self.assertIn(params['model.core.stage1_blocks'], (0, 1, 2))
+            self.assertGreaterEqual(params['training.loss.gamma_readout'], 0.3)
+            self.assertLessEqual(params['training.loss.gamma_readout'], 100.0)
+            cfg = ob._read(Path(record['trial_dir']) / 'config.json')
+            self.assertEqual(cfg['model']['core']['stage1_blocks'],
+                             params['model.core.stage1_blocks'])
+            self.assertEqual(cfg['training']['loss']['gamma_readout'],
+                             params['training.loss.gamma_readout'])
+            self.assertEqual(cfg['model']['core']['output_channels'], 80)
+            self.assertEqual(cfg['model']['core']['output_hw'], [28, 28])
+            self.assertEqual(cfg['training']['total_epochs'], 2)
+            self.assertEqual(cfg['training']['readout_only_epochs'], 1)
+
     def test_study_lock_refuses_live_owner_and_is_recoverable_when_dead(self):
         from unittest.mock import patch
         with ob._lock(self.root):
@@ -174,7 +197,7 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(qsub.call_count, 2)
         arr = qsub.call_args_list[0].args[0]
         collect = qsub.call_args_list[1].args[0]
-        self.assertEqual(arr[:4], ['qsub', '-J', '1-4', '%4'])
+        self.assertEqual(arr[:3], ['qsub', '-J', '1-4%4'])
         self.assertIn('depend=afterany:123[].pbs-m1.metacentrum.cz', collect)
         manifest = ob._read(ob._active(self.root))
         self.assertEqual(manifest['collector_job_id'], '124.pbs-m1.metacentrum.cz')

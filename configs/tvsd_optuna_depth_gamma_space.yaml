@@ -1,0 +1,10 @@
+# First architecture/regularization pilot: keep all other trainer settings fixed.
+# Stage 1 blocks preserve the 80 x 28 x 28 feature shape and Gaussian readout.
+search:
+  model.core.stage1_blocks:
+    type: choice
+    values: [0, 1, 2]
+  training.loss.gamma_readout:
+    type: loguniform
+    low: 0.3
+    high: 100.0

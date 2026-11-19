@@ -16,6 +16,9 @@ search:
     type: loguniform
     low: 0.3
     high: 100.0
+  model.core.stage1_blocks:
+    type: choice
+    values: [0, 1, 2]
   training.scheduler.patience:
     type: choice
     values: [3, 5, 8]

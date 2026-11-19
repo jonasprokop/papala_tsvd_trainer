@@ -31,6 +31,7 @@ model:
     output_hw:
     - 28
     - 28
+    stage1_blocks: 0
     batchnorm_momentum: 0.9
   readout:
     outdims: 1173
