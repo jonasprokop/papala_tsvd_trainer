@@ -1,5 +1,10 @@
 # TVSD ZWM: one registry, one Singularity image
 
+For the **published ZWM 170M neural-alignment benchmark on TVSD V1** (all
+alternate `.ln_1` layers, BBScore RidgeCV and split-half correction), see
+[BENCHMARK_V1.md](BENCHMARK_V1.md). It runs independently of the frozen
+single-layer training candidate and never writes the central SQLite database.
+
 The PBS launcher chooses one of two Python prefixes inside `tvsd-bookworm.sif`.
 Bind Brno2 **only** at `/mnt/tvsd`; self-binding `"$ROOT:$ROOT"` fails on
 MetaCentrum. The original `sinz-base.sif` remains untouched for rollback:

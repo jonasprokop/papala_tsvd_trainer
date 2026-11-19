@@ -1,0 +1,30 @@
+#!/bin/bash
+#PBS -N zwm_v1_ridge
+#PBS -l select=1:ncpus=4:mem=24gb
+#PBS -l walltime=08:00:00
+set -euo pipefail
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+CODE="$ROOT/code/papala_tsvd_trainer"
+SIF="$ROOT/containers/tvsd-bookworm.sif"
+PY=/mnt/tvsd/envs/zwm-py310/bin/python
+: "${PBS_JOBID:?Run through PBS}"
+LAYER="${LAYER_INDEX:-${PBS_ARRAY_INDEX:-}}"
+[[ "$LAYER" =~ ^([0-9]|10|11)$ ]] || {
+  echo 'Specify LAYER_INDEX=0 or submit with qsub -J 1-11%2' >&2; exit 2;
+}
+test -f "$SIF" && test -x "$ROOT/envs/zwm-py310/bin/python"
+mkdir -p "$ROOT/logs"
+exec > "$ROOT/logs/zwm_v1_fit.${PBS_JOBID}.log" 2>&1
+export SINGULARITYENV_PYTHONPATH=/project:/mnt/tvsd/code/ZWM
+export SINGULARITYENV_PYTHONDONTWRITEBYTECODE=1
+export SINGULARITYENV_OPENBLAS_NUM_THREADS=4
+export SINGULARITYENV_OMP_NUM_THREADS=4
+export SINGULARITYENV_MKL_NUM_THREADS=4
+singularity exec \
+  --bind "$CODE:/project" \
+  --bind "$ROOT:/mnt/tvsd" \
+  --pwd /mnt/tvsd/code/ZWM \
+  "$SIF" "$PY" -m transformer_model.benchmark_v1 \
+  --phase fit --layer-index "$LAYER" \
+  --config /project/configs/tvsd_zwm_paper_v1.yaml \
+  --output /mnt/tvsd/results/zwm_v1_paper

@@ -1,0 +1,38 @@
+#!/bin/bash
+#PBS -N zwm_v1_features
+#PBS -q gpu
+#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_cap=compute_80:gpu_mem=8gb:scratch_local=5gb
+#PBS -l walltime=02:00:00
+set -euo pipefail
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+CODE="$ROOT/code/papala_tsvd_trainer"
+SIF="$ROOT/containers/tvsd-bookworm.sif"
+PY=/mnt/tvsd/envs/zwm-py310/bin/python
+OUT=/mnt/tvsd/results/zwm_v1_paper
+: "${PBS_JOBID:?Run through PBS}"
+test -f "$SIF" && test -x "$ROOT/envs/zwm-py310/bin/python"
+test -f "$ROOT/code/ZWM/out/awwkl/zwm-bvd-170m/model.pt"
+mkdir -p "$ROOT/logs"
+exec > "$ROOT/logs/zwm_v1_extract.${PBS_JOBID}.log" 2>&1
+export SINGULARITYENV_PYTHONPATH=/project:/mnt/tvsd/code/ZWM
+export SINGULARITYENV_PYTHONDONTWRITEBYTECODE=1
+export SINGULARITYENV_HF_HUB_OFFLINE=1
+export SINGULARITYENV_TRANSFORMERS_OFFLINE=1
+export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
+export SINGULARITYENV_OPENBLAS_NUM_THREADS=4
+export SINGULARITYENV_OMP_NUM_THREADS=4
+export SINGULARITYENV_MKL_NUM_THREADS=4
+export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
+if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* && "${CUDA_VISIBLE_DEVICES}" != *,* ]]; then
+  index=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | \
+          awk -F, -v uuid="$CUDA_VISIBLE_DEVICES" '{gsub(/^[ \t]+|[ \t]+$/, "", $1);gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($2==uuid) print $1}')
+  [[ "$index" =~ ^[0-9]+$ ]] || { echo 'Cannot resolve PBS GPU UUID' >&2; exit 4; }
+  export SINGULARITYENV_CUDA_VISIBLE_DEVICES="$index"
+fi
+singularity exec --nv \
+  --bind "$CODE:/project" \
+  --bind "$ROOT:/mnt/tvsd" \
+  --pwd /mnt/tvsd/code/ZWM \
+  "$SIF" "$PY" -m transformer_model.benchmark_v1 \
+  --phase extract --config /project/configs/tvsd_zwm_paper_v1.yaml \
+  --output "$OUT"

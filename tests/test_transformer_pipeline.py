@@ -250,6 +250,58 @@ def test_shared_train_entrypoint_uses_separate_python_process(tmp_path,monkeypat
     assert called[-1][called[-1].index('--resume-run-id')+1]=='abc'
 
 
+def test_all_paper_layers_are_captured_from_one_zvm_forward(tmp_path,monkeypatch):
+    import sys
+    import types
+    from transformer_model.backbones import ZWMLayerBank
+    from transformer_model.benchmark_v1 import LAYERS
+
+    checkpoint=tmp_path/'out'/'test.pt'
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b'fake-model')
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.transformer=torch.nn.Module()
+            self.transformer.h=torch.nn.ModuleList()
+            for _ in range(24):
+                block=torch.nn.Module()
+                block.ln_1=torch.nn.Identity()
+                self.transformer.h.append(block)
+
+        def forward(self, x):
+            for block in self.transformer.h:
+                x=block.ln_1(x)+1
+            return x
+
+    class Predictor:
+        def __init__(self, _):
+            self.model=Model()
+            self.calls=0
+
+        def single_image_forward(self, image, frame_gap):
+            assert frame_gap == -1
+            self.calls += 1
+            self.model(torch.zeros(1,4,3))
+
+    source=tmp_path/'zwm'/'zwm_predictor.py'
+    source.parent.mkdir()
+    source.write_text('# mock ZWM\n')
+    parent=types.ModuleType('zwm'); parent.__path__=[]
+    sub=types.ModuleType('zwm.zwm_predictor')
+    sub.ZWMPredictor=Predictor; sub.__file__=str(source)
+    monkeypatch.setitem(sys.modules,'zwm',parent)
+    monkeypatch.setitem(sys.modules,'zwm.zwm_predictor',sub)
+    bank=ZWMLayerBank('test.pt',repo_root=str(tmp_path),layers=LAYERS)
+    features=bank.extract(Image.new('RGB',(8,8)))
+    assert len(features)==12
+    assert [value.shape for value in features]==[(1,3)]*12
+    assert bank.predictor.calls==1
+    assert features[0][0,0]==0 and features[1][0,0]==2
+    bank.close()
+
+
 def test_feature_chunks_resume_after_interrupted_extraction(tmp_path):
     images=tmp_path/'images'; images.mkdir()
     for k in range(3):

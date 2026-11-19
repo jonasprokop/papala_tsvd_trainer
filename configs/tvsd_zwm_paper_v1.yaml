@@ -1,0 +1,48 @@
+# V1-only neural-alignment reproduction with the published ZWM 170M checkpoint.
+# F (804) and N (369) tracked neurons share one 1173-column response axis.
+# Benchmark alpha grid, layer stride and score conventions are pinned in
+# transformer_model/benchmark_v1.py and benchmark_probe.py (BBScore sources).
+project:
+  name: tvsd-zwm-170m-paper-v1
+  output_root: /mnt/tvsd/results
+  sqlite_path: /mnt/tvsd/results/results.sqlite
+  result_sheet_path: /mnt/tvsd/results/runs.csv
+  feature_cache_root: /mnt/tvsd/results/zwm_feature_cache
+runtime:
+  python_executable: /mnt/tvsd/envs/zwm-py310/bin/python
+data:
+  kind: tvsd
+  root: /mnt/tvsd/data/tvsd_waveform_aware_v1/model_dataset
+  dataset_module_path: /project/waveform_aware_tvsd_preprocessing/scripts/dataset.py
+  image_root: /mnt/tvsd/data/assets/THINGS
+  preprocessing:
+    expected_output_hw: [224, 224]
+    normalization_path: /mnt/tvsd/data/tvsd_waveform_aware_v1/model_dataset/normalization.json
+    colorspace: grayscale-replicated
+  loader: {batch_size: 64, num_workers: 4, pin_memory: true}
+  split: {train_fraction: 0.9, seed: 8000, algorithm: frozen_tvsd_dataset_v1}
+model:
+  family: transformer_neural
+  backbone:
+    kind: zwm
+    repo_root: /mnt/tvsd/code/ZWM
+    model_ref: awwkl/zwm-bvd-170m/model.pt
+    pooling: mean            # BBScore ZWM feature aggregation remains unverified
+    cache_chunk_size: 256
+    forward_mode: one_image
+    input_mode: rgb           # original BBScore TVSD uses RGB THINGS images
+  readout:
+    outdims: 1173
+    outdims_by_animal: {F: 804, N: 369}
+training:
+  strategy: frozen_ridge
+  ensemble_members: 1
+  member_seeds: [8000]
+  seed: 8000
+reproducibility:
+  cudnn_benchmark: false
+  cudnn_deterministic: false
+  cuda_matmul_allow_tf32: false
+  cudnn_allow_tf32: true
+  deterministic_algorithms: false
+  full_dataset_sha256: false
