@@ -1,27 +1,31 @@
-# Only parameters already used by the existing model/trainer.
-# Fixed seed, fixed train/val split, fixed epoch budget across trials.
+# Sinz V1: six-parameter optimization.
+# Fixed: 200 epochs, 20 readout-only epochs.
+# Fixed Gaussian initialization: mu_range=0.4, sigma=0.6.
+
 search:
-  training.phase1_lr:
-    type: loguniform
-    low: 0.002
-    high: 0.01
-  training.phase2_lr:
-    type: loguniform
-    low: 0.0001
-    high: 0.001
-  training.optimizer.weight_decay:
+  model.core.stage1_blocks:
     type: choice
-    values: [0.0, 0.0001, 0.001, 0.01]
+    values: [0, 1, 2]
+
   training.loss.gamma_readout:
     type: loguniform
     low: 0.3
     high: 100.0
-  model.core.stage1_blocks:
+
+  training.phase1_lr:
+    type: loguniform
+    low: 0.002
+    high: 0.01
+
+  training.phase2_lr:
+    type: loguniform
+    low: 0.0001
+    high: 0.001
+
+  training.optimizer.weight_decay:
     type: choice
-    values: [0, 1, 2]
+    values: [0.0, 0.0001, 0.001, 0.01]
+
   training.scheduler.patience:
     type: choice
     values: [3, 5, 8]
-  model.readout.init_sigma:
-    type: choice
-    values: [0.2, 0.4, 0.6]
