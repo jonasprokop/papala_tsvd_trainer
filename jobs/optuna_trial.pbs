@@ -4,8 +4,7 @@
 #PBS -l walltime=48:00:00
 
 set -euo pipefail
-ROOT=/storage/brno2/home/jonas_prokop/visual_models
-CODE="$ROOT/code/papala_tsvd_trainer"
+ROOT=$(realpath /storage/brno2/home/jonas_prokop/visual_models)
 SIF="$ROOT/containers/tvsd-bookworm.sif"
 PYTHON=/mnt/tvsd/envs/tvsd-py39/bin/python
 : "${OPTUNA_EXPERIMENT:?qsub -v OPTUNA_EXPERIMENT=...}"
