@@ -1,5 +1,5 @@
 from __future__ import annotations
-import math, shlex, sys, time, shutil
+import json, math, shlex, sys, time, shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Callable
 import numpy as np
@@ -18,6 +18,51 @@ from .data import PreprocessConfig
 from .runtime import EpochTiming,batch_bar,epoch_bar,format_seconds,gpu_memory_gb
 from .runtime import capture_rng_state,restore_rng_state,seed_everything,seed_worker
 from .data import create_split,load_split,save_split
+
+@torch.no_grad()
+def _nonfinite_loss_report(run_dir, model, x, y, mask, pred, loss_terms,
+                           epoch, batch, phase, gamma):
+    """Persist bounded tensor diagnostics only when the loss is non-finite.
+
+    Do not alter the inputs, optimizer, or failing numerical expression. The
+    resulting JSON is sufficient to separate bad data, model outputs, and
+    regularization without dumping individual neural responses.
+    """
+    def summarize(tensor):
+        values = tensor.detach().reshape(-1)
+        finite = torch.isfinite(values)
+        good = values[finite]
+        return {
+            "count": int(values.numel()),
+            "finite": int(finite.sum().item()),
+            "nan": int(torch.isnan(values).sum().item()),
+            "posinf": int(torch.isposinf(values).sum().item()),
+            "neginf": int(torch.isneginf(values).sum().item()),
+            "finite_min": float(good.min().item()) if good.numel() else None,
+            "finite_max": float(good.max().item()) if good.numel() else None,
+        }
+
+    observed = mask.bool()
+    bad_parameters = {}
+    for name, param in model.named_parameters():
+        invalid = int((~torch.isfinite(param)).sum().item())
+        if invalid:
+            bad_parameters[name] = invalid
+    report = {
+        "epoch_zero_based": int(epoch), "batch_zero_based": int(batch),
+        "phase": phase, "gamma_readout": float(gamma),
+        "observed_targets": int(observed.sum().item()),
+        "image": summarize(x),
+        "target_observed": summarize(y[observed]),
+        "target_unobserved": summarize(y[~observed]),
+        "prediction_observed": summarize(pred[observed]),
+        "prediction_unobserved": summarize(pred[~observed]),
+        "loss_terms": {name: summarize(value) for name, value in loss_terms.items()},
+        "nonfinite_parameters": bad_parameters,
+    }
+    path = Path(run_dir) / f"nonfinite_loss_e{epoch:03d}_b{batch:05d}.json"
+    path.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    return path
 
 def _optimizer(model,cfg,lr):
     o=cfg["training"]["optimizer"]
@@ -322,7 +367,11 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
                                 dataset_size=len(trds),
                                 batch_size=int(y.shape[0]),
                                 eps=eps)
-                if not torch.isfinite(z["loss"]): raise FloatingPointError(f"non-finite loss e{epoch} b{bi}")
+                if not torch.isfinite(z["loss"]):
+                    diagnostic = _nonfinite_loss_report(
+                        run_dir, model, x, y, m, pred, z, epoch, bi, phase, gamma)
+                    raise FloatingPointError(
+                        f"non-finite loss e{epoch} b{bi}; diagnostic={diagnostic}")
                 z["loss"].backward(); opt.step(); lv=float(z["loss"].detach().cpu()); pv=float(z["poisson"].detach().cpu())
                 ls+=lv; ps+=pv; nb+=1; step+=1
                 inner.set_postfix(loss=f"{lv:.4f}",pois=f"{pv:.4f}",lr=f"{opt.param_groups[0]['lr']:.1e}",gpu=gpu_memory_gb())
