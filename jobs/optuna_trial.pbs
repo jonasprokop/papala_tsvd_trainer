@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N tvsd_optuna
-#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_mem=16gb:gpu_cap=compute_75:scratch_local=10gb
+#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_mem=16gb:gpu_cap="sm_75,sm_80":scratch_local=10gb
 #PBS -l walltime=48:00:00
 
 set -euo pipefail
