@@ -58,7 +58,7 @@ def collect_predictions(model, loader, device):
         if samples is None or not {'session', 'stimulus_id'}.issubset(samples.columns):
             parts = []
             break
-        parts.append(samples.session.astype(str).to_numpy())
+        parts.append(samples.session.to_numpy().astype("U"))
         stimulus_parts.append(samples.stimulus_id.str.rsplit(':', n=1).str[-1].astype('int64').to_numpy())
     if parts:
         expected = np.concatenate(stimulus_parts)
