@@ -144,3 +144,4 @@ trap - TERM
 persist_worker
 printf 'FINISH: %s exit=%s\n' "$(date -Is)" "$rc"
 exit "$rc"
+

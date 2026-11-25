@@ -326,7 +326,8 @@ def _ensemble_output_dir(output_root: str, candidate_id: str) -> Path:
 
 
 def evaluate_candidate_ensemble(
-    reg: RunRegistry, output_root: str, candidate_id: str
+    reg: RunRegistry, output_root: str, candidate_id: str,
+    save_predictions_override: bool = False,
 ) -> Dict[str, Any]:
     candidate = reg.get_candidate(candidate_id)
     cfg = reg.get_candidate_config(candidate_id)
@@ -354,7 +355,8 @@ def evaluate_candidate_ensemble(
         candidate_id,
         metrics,
         collected,
-        save_predictions=bool(cfg["evaluation"]["save_predictions"]),
+        save_predictions=bool(cfg["evaluation"]["save_predictions"]
+                              or save_predictions_override),
     )
     provenance = {
         "candidate_id": candidate_id,

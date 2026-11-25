@@ -107,6 +107,10 @@ PREDICTION_KEYS = ('cadena_corr_to_average', 'cadena_feve', 'raw_repeated_pearso
                    'pearson_noise_corrected', 'bbscore_transformed_pearson',
                    'bbscore_noise_corrected')
 
+# Original Brain-Score internal consistency defaults to 10 train/test splits.
+# BBScore uses 50; default score_protocols(splits=50) supplies both.
+BRAINSCORE_SPLITS = 10
+
 
 METRIC_LEVELS = {
     'cadena_corr_to_average': 'formula_match if cadena_formula_applicable else adapted',
@@ -114,14 +118,18 @@ METRIC_LEVELS = {
     'cadena_explainable_fraction': 'formula_match if cadena_formula_applicable else adapted',
     'raw_repeated_pearson': 'formula_match',
     'split_half_sb_reliability': 'adapted',
+    'split_half_sb_by_split': 'adapted; retains per-split values for Brain-Score aggregation',
     'pearson_noise_corrected': 'adapted',
     'bbscore_transformed_pearson': 'formula_match',
     'bbscore_noise_corrected': 'adapted',
+    'bbscore_split_half_sb_reliability': 'adapted; BBScore undefined-half convention',
+    'bbscore_clipped_ceiling': 'adapted; BBScore floor of 1e-6',
     'single_trial_pairwise_reliability_estimate': 'adapted',
     'papale_oracle_adapted': 'adapted',
     'papale_reliab_balanced_adapted': 'adapted',
     'papale_oracle_balanced_adapted': 'adapted',
     'papale_oracle_30rep_model_estimate': 'model_based',
+    'papale_reliab_balanced_adapted_mc_se': 'diagnostic',
     'pairwise_reliability_within_session': 'diagnostic',
     'pairwise_reliability_between_sessions': 'diagnostic',
     'median_repeats_per_session_cell': 'diagnostic',
@@ -155,12 +163,38 @@ def _corr(x, y):
     return float(a @ b / denom) if denom > 0 else np.nan
 
 
+def bbscore_pearson_scorer(y_true, y_pred, eps=1e-8):
+    """BBScore metrics/utils.py pearson_correlation_scorer, including constants."""
+    y_true = np.asarray(y_true, dtype=np.float64).ravel()
+    y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
+    if len(y_true) < 2:
+        return np.nan
+    if np.var(y_true) < eps or np.var(y_pred) < eps:
+        return 1.0 if np.allclose(y_true, y_pred, atol=eps) else 0.0
+    r = _corr(y_true, y_pred)
+    if r == 1.0:
+        return 1.0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return float(np.divide(2 * np.float64(r), 1 + np.float64(r)))
+
+
+def bbscore_clip_ceiling(value):
+    """BBScore metrics/base.py BaseMetric.__init__: floor at positive 1e-6."""
+    return float(max(value, 1e-6))
+
+
+def _nanmean_or_nan(values):
+    """Preserve an undefined estimate without an all-NaN RuntimeWarning."""
+    values = np.asarray(values, dtype=np.float64)
+    return float(np.nanmean(values)) if np.isfinite(values).any() else np.nan
+
+
 def papale_reliab_dense(reps):
     """Published definition on dense data: reps [n_reps, n_images] ->
     mean over all repetition pairs of r(rep_a, rep_b) across images."""
     reps = np.asarray(reps, dtype=np.float64)
-    return float(np.nanmean([_corr(reps[a], reps[b])
-                             for a, b in combinations(range(len(reps)), 2)]))
+    return _nanmean_or_nan([_corr(reps[a], reps[b])
+                            for a, b in combinations(range(len(reps)), 2)])
 
 
 def papale_oracle_dense(reps):
@@ -169,7 +203,7 @@ def papale_oracle_dense(reps):
     reps = np.asarray(reps, dtype=np.float64)
     total = reps.sum(axis=0)
     n = len(reps)
-    return float(np.nanmean([_corr(reps[k], (total - reps[k]) / (n - 1)) for k in range(n)]))
+    return _nanmean_or_nan([_corr(reps[k], (total - reps[k]) / (n - 1)) for k in range(n)])
 
 
 def _within_session_reliability(cells, rng, draws):
@@ -198,14 +232,14 @@ def _within_session_reliability(cells, rng, draws):
 
 def papale_balanced(trials_per_image, rng, min_images=MIN_PAIR_IMAGES, order='random'):
     """Published dense formulas on the neuron's largest balanced block.
-    Returns (reliab, oracle, k, n_images)."""
+    Returns (reliab, oracle, k, n_images, Monte-Carlo SE of reliab)."""
     counts = np.array([len(v) for v in trials_per_image])
     if len(counts) == 0:
-        return np.nan, np.nan, 0, 0
+        return np.nan, np.nan, 0, 0, np.nan
     k = int(np.quantile(counts, 1 - BALANCED_IMAGE_FRACTION, method='lower'))
     use = [v for v in trials_per_image if len(v) >= k]
     if k < 2 or len(use) < min_images:
-        return np.nan, np.nan, k, len(use)
+        return np.nan, np.nan, k, len(use), np.nan
     if order not in ('random', 'presentation'):
         raise ValueError("order must be 'random' or 'presentation'")
     # 'random': k random trials per image, as TVSD's reshuffled rep index
@@ -220,7 +254,9 @@ def papale_balanced(trials_per_image, rng, min_images=MIN_PAIR_IMAGES, order='ra
                           for v in use], axis=1)
         rel.append(papale_reliab_dense(block))
         orc.append(papale_oracle_dense(block))
-    return float(np.mean(rel)), float(np.mean(orc)), k, len(use)
+    # Monte-Carlo standard error over subsamples (0 for one deterministic pass).
+    se = float(np.std(rel, ddof=1) / np.sqrt(len(rel))) if len(rel) > 1 else 0.0
+    return float(np.mean(rel)), float(np.mean(orc)), k, len(use), se
 
 
 def oracle_30rep_model_estimate(rel):
@@ -280,15 +316,19 @@ def score_protocols(prediction, response, mask, image_ids, *, splits=50,
     keys = ('cadena_corr_to_average', 'cadena_feve', 'cadena_explainable_fraction',
             'raw_repeated_pearson', 'split_half_sb_reliability',
             'pearson_noise_corrected', 'bbscore_transformed_pearson',
-            'bbscore_noise_corrected', 'single_trial_pairwise_reliability_estimate',
+            'bbscore_noise_corrected', 'bbscore_split_half_sb_reliability',
+            'bbscore_clipped_ceiling', 'single_trial_pairwise_reliability_estimate',
             'papale_oracle_adapted', 'papale_reliab_balanced_adapted',
-            'papale_oracle_balanced_adapted', 'papale_oracle_30rep_model_estimate')
+            'papale_oracle_balanced_adapted', 'papale_oracle_30rep_model_estimate',
+            'papale_reliab_balanced_adapted_mc_se')
     session_keys = ('pairwise_reliability_within_session',
                     'pairwise_reliability_between_sessions',
                     'median_repeats_per_session_cell', 'session_offset_sd_over_signal_sd')
     if sessions is not None:
         keys = keys + session_keys
     result = {key: np.full(width, np.nan) for key in keys}
+    n_brainscore_splits = min(BRAINSCORE_SPLITS, splits)
+    result['split_half_sb_by_split'] = np.full((width, n_brainscore_splits), np.nan)
     for key in ('n_repeated_images', 'n_cadena_images', 'n_observations', 'n_sessions',
                 'papale_balanced_k', 'papale_balanced_n_images'):
         result[key] = np.zeros(width, dtype=int)
@@ -357,8 +397,9 @@ def score_protocols(prediction, response, mask, image_ids, *, splits=50,
             if len(offsets) >= 2 and explainable > 0:
                 result['session_offset_sd_over_signal_sd'][n] = float(
                     np.std(offsets, ddof=1) / np.sqrt(explainable))
-        rel_b, orc_b, k_b, n_b = papale_balanced([v for v, _, _ in repeated], rng,
-                                                  order=balanced_order)
+        rel_b, orc_b, k_b, n_b, se_b = papale_balanced([v for v, _, _ in repeated], rng,
+                                                        order=balanced_order)
+        result['papale_reliab_balanced_adapted_mc_se'][n] = se_b
         result['papale_reliab_balanced_adapted'][n] = rel_b
         result['papale_oracle_balanced_adapted'][n] = orc_b
         result['papale_balanced_k'][n] = k_b
@@ -373,12 +414,13 @@ def score_protocols(prediction, response, mask, image_ids, *, splits=50,
                 held.append(values[k])
                 rest.append((values.sum() - values[k]) / (len(values) - 1))
             oracle.append(_corr(np.asarray(held), np.asarray(rest)))
-        result['papale_oracle_adapted'][n] = float(np.nanmean(oracle))
+        result['papale_oracle_adapted'][n] = _nanmean_or_nan(oracle)
         observed_mean = np.array([values.mean() for values, _, _ in repeated])
         predicted_mean = np.array([pred for _, pred, _ in repeated])
         r = _corr(predicted_mean, observed_mean)
         result['raw_repeated_pearson'][n] = r
         halves = []
+        bb_halves = []
         for _ in range(splits):
             first, second = [], []
             for values, _, _ in repeated:
@@ -388,15 +430,26 @@ def score_protocols(prediction, response, mask, image_ids, *, splits=50,
                 second.append(shuffled[midpoint:].mean())
             half_r = _corr(np.asarray(first), np.asarray(second))
             halves.append(2 * half_r / (1 + half_r) if np.isfinite(half_r) and half_r > -1 else np.nan)
+            # BBScore's data/utils.py sets undefined half-correlations to 0
+            # before Spearman-Brown correction (unlike scipy Pearson).
+            bb_r = np.float64(half_r) if np.isfinite(half_r) else np.float64(0)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                bb_halves.append(float(np.divide(2 * bb_r, 1 + bb_r)))
+        result['split_half_sb_by_split'][n] = halves[:n_brainscore_splits]
         reliability = float(np.mean(halves)) if np.isfinite(halves).all() else np.nan
         result['split_half_sb_reliability'][n] = reliability
+        bb_reliability = float(np.mean(bb_halves))
+        result['bbscore_split_half_sb_reliability'][n] = bb_reliability
+        if not np.isnan(bb_reliability):
+            ceiling = bbscore_clip_ceiling(bb_reliability)
+            result['bbscore_clipped_ceiling'][n] = ceiling
+            transformed = bbscore_pearson_scorer(observed_mean, predicted_mean)
+            result['bbscore_transformed_pearson'][n] = transformed
+            if np.isfinite(transformed):
+                result['bbscore_noise_corrected'][n] = transformed / ceiling
         if not (np.isfinite(r) and reliability > 1e-6):
             continue
         result['pearson_noise_corrected'][n] = r / np.sqrt(reliability)
-        if r > -1:
-            transformed = 2 * r / (1 + r)
-            result['bbscore_transformed_pearson'][n] = transformed
-            result['bbscore_noise_corrected'][n] = transformed / reliability
     if reliability_only:
         for key in PREDICTION_KEYS:
             result[key][:] = np.nan

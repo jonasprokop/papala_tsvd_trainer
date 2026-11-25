@@ -167,7 +167,7 @@ def command_eval(args) -> None:
         args.run_id,
         metrics,
         collected,
-        save_predictions=bool(cfg["evaluation"]["save_predictions"]),
+        save_predictions=bool(cfg["evaluation"]["save_predictions"] or args.save_predictions),
     )
     _json(summary)
 
@@ -175,7 +175,9 @@ def command_eval(args) -> None:
 def command_eval_ensemble(args) -> None:
     reg = _registry(args.output_root)
     reg.initialize()
-    summary = evaluate_candidate_ensemble(reg, args.output_root, args.candidate_id)
+    summary = evaluate_candidate_ensemble(
+        reg, args.output_root, args.candidate_id,
+        save_predictions_override=args.save_predictions)
     _json(summary)
 
 
@@ -468,11 +470,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_output_root(p)
     p.add_argument("--run-id", required=True)
     p.add_argument("--checkpoint", default=None)
+    p.add_argument("--save-predictions", action="store_true",
+                   help="save trial-level predictions for later rescoring (does not alter training config)")
     p.set_defaults(func=command_eval)
 
     p = sub.add_parser("eval-ensemble", help="evaluate the completed members of one candidate")
     _add_output_root(p)
     p.add_argument("--candidate-id", required=True)
+    p.add_argument("--save-predictions", action="store_true")
     p.set_defaults(func=command_eval_ensemble)
 
     p = sub.add_parser("workflows")

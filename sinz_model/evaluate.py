@@ -43,16 +43,51 @@ def collect_predictions(model, loader, device):
         image_id_parts.append(batch["image_id"].numpy())
         repeat_parts.append(batch["repeat_index"].numpy())
 
-    return {
+    collected = {
         "prediction": np.concatenate(prediction_parts, axis=0),
         "response": np.concatenate(response_parts, axis=0),
         "mask": np.concatenate(mask_parts, axis=0),
         "image_id": np.concatenate(image_id_parts, axis=0),
         "repeat_index": np.concatenate(repeat_parts, axis=0),
     }
+    # The test loader is unshuffled. Read session IDs from its frozen sample
+    # index rather than adding metadata to every *training* batch.
+    parts, stimulus_parts = [], []
+    for ds in getattr(loader.dataset, 'datasets', []):
+        samples = getattr(getattr(ds, 'inner', None), 'samples', None)
+        if samples is None or not {'session', 'stimulus_id'}.issubset(samples.columns):
+            parts = []
+            break
+        parts.append(samples.session.astype(str).to_numpy())
+        stimulus_parts.append(samples.stimulus_id.str.rsplit(':', n=1).str[-1].astype('int64').to_numpy())
+    if parts:
+        expected = np.concatenate(stimulus_parts)
+        if not np.array_equal(collected['image_id'], expected):
+            raise ValueError('Unshuffled TVSD test loader and sample_index order disagree')
+        collected['session'] = np.concatenate(parts)
+    return collected
+
+
+def attach_protocol_context(collected, cfg):
+    """Stage 2 (GPU): attach stable TVSD neuron IDs and animal labels so the
+    saved predictions can be rescored later. Cheap; binds no reliability export
+    (that is stage 3, `python -m evaluation.compare_evaluations`, on CPU), so a
+    provenance mismatch can never fail a GPU inference job after the fact.
+    """
+    if cfg['data'].get('kind') != 'tvsd':
+        return collected
+    widths = {a: int(cfg['model']['readout']['outdims_by_animal'][a]) for a in ('F', 'N')}
+    ids = np.asarray([f'{a}/{i}' for a in ('F', 'N') for i in range(widths[a])])
+    if len(ids) != collected['response'].shape[1]:
+        raise ValueError('TVSD readout width disagrees with collected neuron columns')
+    collected = dict(collected)
+    collected['neuron_ids'] = ids
+    collected['groups'] = np.asarray([a for a in ('F', 'N') for _ in range(widths[a])])
+    return collected
 
 
 def compute_natural_image_metrics(collected):
+    # Legacy metrics only. Paper protocols are stage 3 (CPU) on saved predictions.
     single = per_neuron_masked_pearson(
         collected["prediction"],
         collected["response"],
@@ -175,7 +210,7 @@ def evaluate_checkpoint(cfg, checkpoint_path, device):
         raise ValueError("Evaluation data config differs from checkpoint")
 
     table, loader = build_test_loader(cfg)
-    collected = collect_predictions(model, loader, device)
+    collected = attach_protocol_context(collect_predictions(model, loader, device), cfg)
     metrics = compute_natural_image_metrics(collected)
     return metrics, collected
 
@@ -211,5 +246,6 @@ def evaluate_ensemble(cfg, checkpoint_paths, device):
     )
     ensemble = dict(reference)
     ensemble["prediction"] = ensemble_prediction
+    ensemble = attach_protocol_context(ensemble, saved_cfg)
     metrics = compute_natural_image_metrics(ensemble)
     return metrics, ensemble
