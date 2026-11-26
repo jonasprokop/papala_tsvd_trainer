@@ -1,0 +1,41 @@
+#!/bin/bash
+#PBS -N zwm_mua_exact_extract
+#PBS -q gpu
+#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_cap=compute_80:gpu_mem=16gb:scratch_local=5gb
+#PBS -l walltime=24:00:00
+
+set -euo pipefail
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+CODE="$ROOT/code/papala_tsvd_trainer"
+SIF="$ROOT/containers/tvsd-bookworm.sif"
+PY=/mnt/tvsd/envs/zwm-py310/bin/python
+: "${PBS_JOBID:?Requires PBS}"
+: "${PBS_ARRAY_INDEX:?Requires 0-3 PBS array}"
+[[ "$PBS_ARRAY_INDEX" =~ ^[0-3]$ ]] || exit 2
+test -f "$SIF" && test -x "$ROOT/envs/zwm-py310/bin/python"
+mkdir -p "$ROOT/logs"
+exec > "$ROOT/logs/zwm_mua_exact_extract.${PBS_JOBID}.log" 2>&1
+export SINGULARITYENV_PYTHONPATH=/project:/mnt/tvsd/code/ZWM
+export SINGULARITYENV_HF_HUB_OFFLINE=1
+export SINGULARITYENV_TRANSFORMERS_OFFLINE=1
+export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
+export SINGULARITYENV_PYTHONDONTWRITEBYTECODE=1
+export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
+if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* && "${CUDA_VISIBLE_DEVICES}" != *,* ]]; then
+  index=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | \
+          awk -F, -v uuid="$CUDA_VISIBLE_DEVICES" '{gsub(/^[ \t]+|[ \t]+$/, "", $1);gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($2==uuid) print $1}')
+  [[ "$index" =~ ^[0-9]+$ ]] || { echo 'PBS GPU UUID not found' >&2; exit 4; }
+  export SINGULARITYENV_CUDA_VISIBLE_DEVICES="$index"
+fi
+echo "START $(date -Is), host=$(hostname), shard=$PBS_ARRAY_INDEX"
+singularity exec --nv \
+  --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
+  --pwd /mnt/tvsd/code/ZWM "$SIF" "$PY" \
+  -m transformer_model.benchmark_spatial_exact \
+  --phase extract \
+  --config /project/configs/tvsd_zwm_paper_mua_v1.yaml \
+  --output /mnt/tvsd/results/zwm_v1_paper_mua_spatial_exact_h100 \
+  --bbscore-root /mnt/tvsd/code/bbscore_public \
+  --mua-root /mnt/tvsd/data/papale_mua_release/TVSD \
+  --layer-index 3 --shards 4 --shard-index "$PBS_ARRAY_INDEX"
+echo "FINISH $(date -Is)"

@@ -1,0 +1,54 @@
+#!/bin/bash
+#PBS -N zwm_mua_exact_h100
+#PBS -q gpu
+#PBS -l select=1:ncpus=8:mem=32gb:ngpus=1:gpu_cap=compute_90:gpu_mem=85gb:scratch_local=5gb
+#PBS -l walltime=48:00:00
+
+set -euo pipefail
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+CODE="$ROOT/code/papala_tsvd_trainer"
+SIF="$ROOT/containers/tvsd-bookworm.sif"
+PY=/mnt/tvsd/envs/zwm-py310/bin/python
+: "${PBS_JOBID:?Requires PBS}"
+: "${ZWM_EXACT_PHASE:?Set phase to gram or fit when submitting}"
+[[ "$ZWM_EXACT_PHASE" == gram || "$ZWM_EXACT_PHASE" == fit ]] || exit 2
+test -f "$SIF" && test -x "$ROOT/envs/zwm-py310/bin/python"
+mkdir -p "$ROOT/logs"
+exec > "$ROOT/logs/zwm_mua_exact_${ZWM_EXACT_PHASE}.${PBS_JOBID}.log" 2>&1
+export SINGULARITYENV_PYTHONPATH=/project:/mnt/tvsd/code/ZWM
+export SINGULARITYENV_PYTHONDONTWRITEBYTECODE=1
+export SINGULARITYENV_OPENBLAS_NUM_THREADS=8
+export SINGULARITYENV_OMP_NUM_THREADS=8
+export SINGULARITYENV_MKL_NUM_THREADS=8
+export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
+if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* && "${CUDA_VISIBLE_DEVICES}" != *,* ]]; then
+  index=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | \
+          awk -F, -v uuid="$CUDA_VISIBLE_DEVICES" '{gsub(/^[ \t]+|[ \t]+$/, "", $1);gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($2==uuid) print $1}')
+  [[ "$index" =~ ^[0-9]+$ ]] || { echo 'PBS GPU UUID not found' >&2; exit 4; }
+  export SINGULARITYENV_CUDA_VISIBLE_DEVICES="$index"
+fi
+echo "START $(date -Is), host=$(hostname), phase=$ZWM_EXACT_PHASE"
+singularity exec --nv \
+  --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
+  --pwd /mnt/tvsd/code/ZWM "$SIF" "$PY" - <<'PY'
+import torch
+print('PyTorch:',torch.__version__,'CUDA runtime:',torch.version.cuda,flush=True)
+print('GPU:',torch.cuda.get_device_name(0),
+      'capability:',torch.cuda.get_device_capability(0),flush=True)
+print('Free / total GiB:',tuple(round(x/2**30,2) for x in torch.cuda.mem_get_info(0)),flush=True)
+if torch.cuda.get_device_capability(0)[0] < 9:
+    raise RuntimeError('H100 compute capability 9.0 is mandatory for this fit')
+u=torch.ones((1024,1024),device='cuda')
+assert float((u@u)[0,0].item())==1024.
+PY
+singularity exec --nv \
+  --bind "$CODE:/project" --bind "$ROOT:/mnt/tvsd" \
+  --pwd /mnt/tvsd/code/ZWM "$SIF" "$PY" \
+  -m transformer_model.benchmark_spatial_exact \
+  --phase "$ZWM_EXACT_PHASE" \
+  --config /project/configs/tvsd_zwm_paper_mua_v1.yaml \
+  --output /mnt/tvsd/results/zwm_v1_paper_mua_spatial_exact_h100 \
+  --bbscore-root /mnt/tvsd/code/bbscore_public \
+  --mua-root /mnt/tvsd/data/papale_mua_release/TVSD \
+  --layer-index 3
+echo "FINISH $(date -Is), phase=$ZWM_EXACT_PHASE"
