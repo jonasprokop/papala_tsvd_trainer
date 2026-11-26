@@ -1,0 +1,134 @@
+diff --git a/evaluation/mua_adapter.py b/evaluation/mua_adapter.py
+index fd7c79f..ba0d4dc 100644
+--- a/evaluation/mua_adapter.py
++++ b/evaluation/mua_adapter.py
+@@ -69,10 +69,12 @@ def _read_monkey(mua_path: Path, metadata_path: Path, *, animal: str,
+     except ImportError as exc:
+         raise ImportError('Papale MUA .mat files require h5py (Python 3.10 runtime)') from exc
+     start, stop = CHANNELS[region][animal]
+-    with h5py.File(metadata_path, 'r') as meta:
++    # On MetaCentrum's Brno2 filesystem HDF5's default sec2 driver can fail
++    # with EBUSY even for read-only files. stdio works for the released v7.3 MATs.
++    with h5py.File(metadata_path, 'r', driver='stdio') as meta:
+         train_paths = _paths_from_metadata(meta, 'train')
+         test_paths = _paths_from_metadata(meta, 'test')
+-    with h5py.File(mua_path, 'r') as f:
++    with h5py.File(mua_path, 'r', driver='stdio') as f:
+         # MATLAB v7.3 HDF5 dimensions are already in BBScore's access order:
+         # [image, channel] and [repeat, image, channel], respectively.
+         # Keep the source's double precision (MATLAB); do not quantize scores.
+@@ -145,6 +147,28 @@ def _split_sha256(rows: pd.DataFrame) -> str:
+     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+ 
+ 
++def _resolve_image_paths(image_root: Path, paths: list[str]) -> list[str]:
++    """Bind original MATLAB paths to the real THINGS tree, without guessing order.
++
++    Papale's things_path typically has category/file.jpg, whereas our THINGS
++    directory has object_images/category/file.jpg. Preserve either supported
++    layout, checking every image before finalizing an immutable dataset.
++    """
++    resolved = []
++    for path in paths:
++        direct = Path(path)
++        with_subdir = Path('object_images') / direct
++        if (image_root / direct).is_file():
++            resolved.append(direct.as_posix())
++        elif (image_root / with_subdir).is_file():
++            resolved.append(with_subdir.as_posix())
++        else:
++            raise FileNotFoundError(
++                f'Original THINGS image missing: {path!r}; checked '
++                f'{image_root / direct} and {image_root / with_subdir}')
++    return resolved
++
++
+ def _pack_monkey(folder: Path, *, animal: str, region: str, train_paths,
+                  test_paths, train, reps, partitions):
+     """Build row-level test repeats; keep normalized signed MUA untouched."""
+@@ -209,10 +233,12 @@ def prepare(*, f_mua: Path, n_mua: Path, f_metadata: Path, n_metadata: Path,
+                          'them as matching rows, so a shared image index is unsafe')
+     if set(f_train) & set(f_test):
+         raise ValueError('Paper train and test stimulus images overlap')
+-    if check_images:
+-        for rel in f_train + f_test:
+-            if not (image_root/rel).is_file():
+-                raise FileNotFoundError(f'Original THINGS image missing: {image_root/rel}')
++    # Rebind only the filesystem paths. Neural responses remain associated with
++    # the original ordered image IDs; F and N have already been compared fully.
++    resolved_paths = (_resolve_image_paths(image_root, f_train + f_test)
++                      if check_images else f_train + f_test)
++    resolved_train = resolved_paths[:len(f_train)]
++    resolved_test = resolved_paths[len(f_train):]
+     partitions = _assign_partitions(len(f_train), seed=seed,
+                                     val_fraction=val_fraction)
+     digests = {name: _sha256(path) for name, path in sources.items()}
+@@ -225,10 +251,11 @@ def prepare(*, f_mua: Path, n_mua: Path, f_metadata: Path, n_metadata: Path,
+         observed_count, missing_count = 0, 0
+         indices, unit_rows = [], []
+         for animal in ('F', 'N'):
+-            trp, tep, train, _, reps, (measured, oracle) = both[animal]
++            _, _, train, _, reps, (measured, oracle) = both[animal]
+             local, observed, missing = _pack_monkey(
+                 temporary/'sessions', animal=animal, region=region,
+-                train_paths=trp, test_paths=tep, train=train, reps=reps,
++                train_paths=resolved_train, test_paths=resolved_test,
++                train=train, reps=reps,
+                 partitions=partitions)
+             records.extend(local)
+             observed_count += observed
+diff --git a/tests/test_mua_adapter.py b/tests/test_mua_adapter.py
+index af6d946..29cb8c9 100644
+--- a/tests/test_mua_adapter.py
++++ b/tests/test_mua_adapter.py
+@@ -44,11 +44,17 @@ class MUAAdapterTest(unittest.TestCase):
+             'data.mat': {
+                 'train_MUA': train, 'test_MUA': test,
+                 'test_MUA_reps': reps, 'reliab': reliab}}
+-        module = SimpleNamespace(File=lambda path, _: FakeFile(fake[str(path)]))
++        opened = []
++        def open_mat(path, mode, **kwargs):
++            opened.append((str(path), mode, kwargs.get('driver')))
++            return FakeFile(fake[str(path)])
++        module = SimpleNamespace(File=open_mat)
+         with patch.dict(sys.modules, {'h5py': module}):
+             out = ma._read_monkey(Path('data.mat'), Path('meta.mat'),
+                                   animal='F', region='V1')
+         self.assertEqual(out[:2], (['a.png','b.png','c.png'], ['d.png','e.png']))
++        self.assertEqual(opened, [('meta.mat', 'r', 'stdio'),
++                                  ('data.mat', 'r', 'stdio')])
+         self.assertEqual(out[2].shape, (3,512))
+         self.assertEqual(out[4].shape, (2,2,512))
+         self.assertEqual(float(out[2][0,0]), -1.0)
+@@ -121,7 +127,7 @@ class MUAAdapterTest(unittest.TestCase):
+         fake = {'meta.mat': {'train_imgs': group(['a.png']), 'test_imgs': group(['d.png', 'e.png'])},
+                 'data.mat': {'train_MUA': np.zeros((1, 1024)), 'test_MUA': reps.mean(0),
+                              'test_MUA_reps': reps, 'reliab': reliab, 'oracle': oracle}}
+-        module = SimpleNamespace(File=lambda path, _: FakeFile(fake[str(path)]))
++        module = SimpleNamespace(File=lambda path, _, **kwargs: FakeFile(fake[str(path)]))
+         with patch.dict(sys.modules, {'h5py': module}):
+             out = ma._read_monkey(Path('data.mat'), Path('meta.mat'), animal='N', region='V4')
+         measured, orc = out[-1]
+@@ -144,8 +150,11 @@ class MUAAdapterTest(unittest.TestCase):
+                 path.write_bytes(b'synthetic')
+             images = base/'images'
+             images.mkdir()
+-            for name in ('a.png','b.png','c.png','x.png'):
++            for name in ('a.png','b.png','c.png'):
+                 (images/name).write_bytes(b'img')
++            # Real Papale metadata omits the THINGS object_images/ subfolder.
++            (images/'object_images').mkdir()
++            (images/'object_images'/'x.png').write_bytes(b'img')
+             # 512 V1 channels per monkey; signed normalized values are allowed.
+             train = np.tile(np.array([[-0.5],[0.5],[1.0]],np.float32),(1,512))
+             reps = np.tile(np.array([[[0.4]], [[0.6]]],np.float32),(1,1,512))
+@@ -168,6 +177,9 @@ class MUAAdapterTest(unittest.TestCase):
+             self.assertEqual(len(pd.read_csv(dest/'unit_to_neuron.csv')), 1024)
+             index = pd.read_csv(dest/'sample_index.csv')
+             self.assertEqual(len(index), 2*(3+2))
++            self.assertEqual(set(index.loc[index.partition.eq('test'),
++                                           'image_relative_path']),
++                             {'object_images/x.png'})
+             self.assertEqual(ma._split_sha256(index), info['split_sha256'])
+             self.assertTrue(np.isfinite(pd.read_csv(dest/'neuron_index.csv')
+                                         ['papale_reliab_measured']).all())

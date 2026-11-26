@@ -44,11 +44,17 @@ class MUAAdapterTest(unittest.TestCase):
             'data.mat': {
                 'train_MUA': train, 'test_MUA': test,
                 'test_MUA_reps': reps, 'reliab': reliab}}
-        module = SimpleNamespace(File=lambda path, _: FakeFile(fake[str(path)]))
+        opened = []
+        def open_mat(path, mode, **kwargs):
+            opened.append((str(path), mode, kwargs.get('driver')))
+            return FakeFile(fake[str(path)])
+        module = SimpleNamespace(File=open_mat)
         with patch.dict(sys.modules, {'h5py': module}):
             out = ma._read_monkey(Path('data.mat'), Path('meta.mat'),
                                   animal='F', region='V1')
         self.assertEqual(out[:2], (['a.png','b.png','c.png'], ['d.png','e.png']))
+        self.assertEqual(opened, [('meta.mat', 'r', 'stdio'),
+                                  ('data.mat', 'r', 'stdio')])
         self.assertEqual(out[2].shape, (3,512))
         self.assertEqual(out[4].shape, (2,2,512))
         self.assertEqual(float(out[2][0,0]), -1.0)
@@ -121,7 +127,7 @@ class MUAAdapterTest(unittest.TestCase):
         fake = {'meta.mat': {'train_imgs': group(['a.png']), 'test_imgs': group(['d.png', 'e.png'])},
                 'data.mat': {'train_MUA': np.zeros((1, 1024)), 'test_MUA': reps.mean(0),
                              'test_MUA_reps': reps, 'reliab': reliab, 'oracle': oracle}}
-        module = SimpleNamespace(File=lambda path, _: FakeFile(fake[str(path)]))
+        module = SimpleNamespace(File=lambda path, _, **kwargs: FakeFile(fake[str(path)]))
         with patch.dict(sys.modules, {'h5py': module}):
             out = ma._read_monkey(Path('data.mat'), Path('meta.mat'), animal='N', region='V4')
         measured, orc = out[-1]
@@ -144,8 +150,11 @@ class MUAAdapterTest(unittest.TestCase):
                 path.write_bytes(b'synthetic')
             images = base/'images'
             images.mkdir()
-            for name in ('a.png','b.png','c.png','x.png'):
+            for name in ('a.png','b.png','c.png'):
                 (images/name).write_bytes(b'img')
+            # Real Papale metadata omits the THINGS object_images/ subfolder.
+            (images/'object_images').mkdir()
+            (images/'object_images'/'x.png').write_bytes(b'img')
             # 512 V1 channels per monkey; signed normalized values are allowed.
             train = np.tile(np.array([[-0.5],[0.5],[1.0]],np.float32),(1,512))
             reps = np.tile(np.array([[[0.4]], [[0.6]]],np.float32),(1,1,512))
@@ -168,6 +177,9 @@ class MUAAdapterTest(unittest.TestCase):
             self.assertEqual(len(pd.read_csv(dest/'unit_to_neuron.csv')), 1024)
             index = pd.read_csv(dest/'sample_index.csv')
             self.assertEqual(len(index), 2*(3+2))
+            self.assertEqual(set(index.loc[index.partition.eq('test'),
+                                           'image_relative_path']),
+                             {'object_images/x.png'})
             self.assertEqual(ma._split_sha256(index), info['split_sha256'])
             self.assertTrue(np.isfinite(pd.read_csv(dest/'neuron_index.csv')
                                         ['papale_reliab_measured']).all())

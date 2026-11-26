@@ -69,10 +69,12 @@ def _read_monkey(mua_path: Path, metadata_path: Path, *, animal: str,
     except ImportError as exc:
         raise ImportError('Papale MUA .mat files require h5py (Python 3.10 runtime)') from exc
     start, stop = CHANNELS[region][animal]
-    with h5py.File(metadata_path, 'r') as meta:
+    # On MetaCentrum's Brno2 filesystem HDF5's default sec2 driver can fail
+    # with EBUSY even for read-only files. stdio works for the released v7.3 MATs.
+    with h5py.File(metadata_path, 'r', driver='stdio') as meta:
         train_paths = _paths_from_metadata(meta, 'train')
         test_paths = _paths_from_metadata(meta, 'test')
-    with h5py.File(mua_path, 'r') as f:
+    with h5py.File(mua_path, 'r', driver='stdio') as f:
         # MATLAB v7.3 HDF5 dimensions are already in BBScore's access order:
         # [image, channel] and [repeat, image, channel], respectively.
         # Keep the source's double precision (MATLAB); do not quantize scores.
@@ -145,6 +147,28 @@ def _split_sha256(rows: pd.DataFrame) -> str:
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
+def _resolve_image_paths(image_root: Path, paths: list[str]) -> list[str]:
+    """Bind original MATLAB paths to the real THINGS tree, without guessing order.
+
+    Papale's things_path typically has category/file.jpg, whereas our THINGS
+    directory has object_images/category/file.jpg. Preserve either supported
+    layout, checking every image before finalizing an immutable dataset.
+    """
+    resolved = []
+    for path in paths:
+        direct = Path(path)
+        with_subdir = Path('object_images') / direct
+        if (image_root / direct).is_file():
+            resolved.append(direct.as_posix())
+        elif (image_root / with_subdir).is_file():
+            resolved.append(with_subdir.as_posix())
+        else:
+            raise FileNotFoundError(
+                f'Original THINGS image missing: {path!r}; checked '
+                f'{image_root / direct} and {image_root / with_subdir}')
+    return resolved
+
+
 def _pack_monkey(folder: Path, *, animal: str, region: str, train_paths,
                  test_paths, train, reps, partitions):
     """Build row-level test repeats; keep normalized signed MUA untouched."""
@@ -209,10 +233,12 @@ def prepare(*, f_mua: Path, n_mua: Path, f_metadata: Path, n_metadata: Path,
                          'them as matching rows, so a shared image index is unsafe')
     if set(f_train) & set(f_test):
         raise ValueError('Paper train and test stimulus images overlap')
-    if check_images:
-        for rel in f_train + f_test:
-            if not (image_root/rel).is_file():
-                raise FileNotFoundError(f'Original THINGS image missing: {image_root/rel}')
+    # Rebind only the filesystem paths. Neural responses remain associated with
+    # the original ordered image IDs; F and N have already been compared fully.
+    resolved_paths = (_resolve_image_paths(image_root, f_train + f_test)
+                      if check_images else f_train + f_test)
+    resolved_train = resolved_paths[:len(f_train)]
+    resolved_test = resolved_paths[len(f_train):]
     partitions = _assign_partitions(len(f_train), seed=seed,
                                     val_fraction=val_fraction)
     digests = {name: _sha256(path) for name, path in sources.items()}
@@ -225,10 +251,11 @@ def prepare(*, f_mua: Path, n_mua: Path, f_metadata: Path, n_metadata: Path,
         observed_count, missing_count = 0, 0
         indices, unit_rows = [], []
         for animal in ('F', 'N'):
-            trp, tep, train, _, reps, (measured, oracle) = both[animal]
+            _, _, train, _, reps, (measured, oracle) = both[animal]
             local, observed, missing = _pack_monkey(
                 temporary/'sessions', animal=animal, region=region,
-                train_paths=trp, test_paths=tep, train=train, reps=reps,
+                train_paths=resolved_train, test_paths=resolved_test,
+                train=train, reps=reps,
                 partitions=partitions)
             records.extend(local)
             observed_count += observed
