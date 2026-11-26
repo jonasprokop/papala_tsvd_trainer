@@ -111,3 +111,17 @@ def finite_summary(values):
     return dict(mean=float(valid.mean()) if len(valid) else None,
                 median=float(np.median(valid)) if len(valid) else None,
                 n_valid=int(len(valid)))
+
+
+def bbscore_floor_corrected_scores(pearson_transformed, split_half_reliability):
+    """Reapply BBScore's 1e-6 ceiling floor to already saved layer scores.
+
+    This matches metrics/base.py's normalization convention, but uses our
+    existing split-half estimates; it does not rerun BBScore's random splits.
+    """
+    scores = np.asarray(pearson_transformed, dtype=np.float64)
+    reliability = np.asarray(split_half_reliability, dtype=np.float64)
+    if scores.shape != reliability.shape:
+        raise ValueError('Transformed Pearson and reliability shapes differ')
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return scores / np.maximum(reliability, 1e-6)

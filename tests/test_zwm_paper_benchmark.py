@@ -14,7 +14,8 @@ from sklearn.linear_model import RidgeCV
 
 from transformer_model import benchmark_v1 as benchmark
 from transformer_model.benchmark_probe import BB_SCORE_ALPHAS, fit_masked_bbscore
-from transformer_model.benchmark_stats import score_repeated_stimuli, finite_summary
+from transformer_model.benchmark_stats import (bbscore_floor_corrected_scores,
+                                               score_repeated_stimuli, finite_summary)
 
 
 class ZWMPaperProtocolTests(unittest.TestCase):
@@ -215,6 +216,39 @@ class ZWMPaperProtocolTests(unittest.TestCase):
         result = score_repeated_stimuli(y,y,np.ones_like(y,dtype=bool),ids)
         self.assertEqual(result['n_repeated_images'].tolist(),[0])
         self.assertTrue(np.isnan(result['noise_corrected_pearson'][0]))
+
+    def test_bbscore_floor_preserves_channels_with_negative_reliability(self):
+        scores = bbscore_floor_corrected_scores(
+            np.array([.8, .2, -.1]), np.array([.8, -.2, 0.0]))
+        np.testing.assert_allclose(scores, [1.0, 200000.0, -100000.0])
+        self.assertEqual(finite_summary(scores)['n_valid'], 3)
+
+    def test_report_separates_mean_median_and_bbscore_floor_ranking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out/'layers').mkdir()
+            (out/'protocol.json').write_text(json.dumps({
+                'n_neurons': 4, 'source_dataset': 'tvsd_papale_normmua_v1'}))
+            for index in range(len(benchmark.LAYERS)):
+                score = ([.1, .1, .1, 4.0] if index == 0 else
+                         [.5, .5, .5, .6] if index == 1 else
+                         [.2, .2, .2, .2])
+                bbscore = .9 if index == 0 else .5 if index == 1 else .3
+                np.savez_compressed(
+                    out/'layers'/f'{index:02d}.npz',
+                    neuron_ids=np.array(['F/0', 'F/1', 'N/0', 'N/1']),
+                    noise_corrected_pearson=np.array(score),
+                    bbscore_pearson=np.full(4, bbscore),
+                    split_half_reliability=np.array([1., 1., -.2, 1.]),
+                    raw_pearson=np.full(4, .4),
+                    n_repeated_images=np.full(4, 100))
+            benchmark._report(out)
+            report = json.loads((out/'summary.json').read_text())
+            self.assertEqual(report['best_layer'], benchmark.LAYERS[0])
+            self.assertEqual(report['best_median_layer'], benchmark.LAYERS[1])
+            self.assertEqual(report['best_bbscore_floor_layer'], benchmark.LAYERS[0])
+            self.assertEqual(report['layers'][0]['bbscore_floor']['n_valid'], 4)
+            self.assertEqual(report['layers'][0]['noise_corrected']['n_valid'], 4)
 
 
 if __name__ == '__main__':

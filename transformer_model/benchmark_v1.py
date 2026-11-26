@@ -23,7 +23,8 @@ from PIL import Image
 
 from sinz_model.runtime import load_config, sha256_file
 from sinz_model.tvsd_data import TVSDTrainingBundle
-from .benchmark_stats import finite_summary, score_repeated_stimuli
+from .benchmark_stats import (bbscore_floor_corrected_scores, finite_summary,
+                              score_repeated_stimuli)
 from .train import _images_index, _neuron_order, _safe_image
 from .benchmark_probe import BB_SCORE_ALPHAS, fit_masked_bbscore
 
@@ -376,27 +377,46 @@ def _report(out):
             score = data['noise_corrected_pearson']
             raw = data['raw_pearson']
             n_images = data['n_repeated_images']
+            bbscore_floor = bbscore_floor_corrected_scores(
+                data['bbscore_pearson'], data['split_half_reliability'])
             if len(ids) != expected_neurons or len(set(ids)) != expected_neurons:
                 raise ValueError(f'Invalid neuron cohort for {layer}')
         rows.append(dict(layer=layer, noise_corrected=finite_summary(score),
+                         bbscore_floor=finite_summary(bbscore_floor),
                          raw_pearson=finite_summary(raw),
                          eligible_neurons=int(np.count_nonzero(n_images >= 20))))
     eligible = [row for row in rows if row['noise_corrected']['mean'] is not None]
     if not eligible:
         raise RuntimeError('No valid split-half-corrected V1 scores')
     best = max(eligible, key=lambda item:item['noise_corrected']['mean'])
+    best_median = max(eligible, key=lambda item:item['noise_corrected']['median'])
+    floor_eligible = [row for row in rows if row['bbscore_floor']['median'] is not None]
+    best_floor = max(floor_eligible,
+                     key=lambda item:item['bbscore_floor']['median']) if floor_eligible else None
     report = dict(benchmark='TVSDV1', model='ZWM 170M',
                   source_dataset=protocol['source_dataset'],
                   published_best_layer_score=0.95,
                   published_value_source='Aw et al., Table S25',
                   best_layer=best['layer'], best_score=best['noise_corrected']['mean'],
+                  best_median_layer=best_median['layer'],
+                  best_median_score=best_median['noise_corrected']['median'],
+                  best_bbscore_floor_layer=best_floor['layer'] if best_floor else None,
+                  best_bbscore_floor_score=(best_floor['bbscore_floor']['median']
+                                            if best_floor else None),
+                  bbscore_floor_note=('BBScore 1e-6 ceiling floor applied to the saved '
+                      'split-half estimates; the original BBScore RNG was not rerun.'),
                   layers=rows, caveat=('Original BBScore normalized MUA targets; '
                   'the exact ZWM feature wrapper/pooling is still unverified.' if
                   protocol['source_dataset'] == 'tvsd_papale_normmua_v1' else
                   'Tracked sorted units, not the original BBScore MUA targets. '
                   'Pooling and paper layer selection remain unverified.'))
     _atomic_json(out/'summary.json', report)
-    print(json.dumps(dict(best_layer=report['best_layer'],best_score=report['best_score'],
+    print(json.dumps(dict(best_mean_layer=report['best_layer'],
+                          best_mean_score=report['best_score'],
+                          best_median_layer=report['best_median_layer'],
+                          best_median_score=report['best_median_score'],
+                          best_bbscore_floor_layer=report['best_bbscore_floor_layer'],
+                          best_bbscore_floor_score=report['best_bbscore_floor_score'],
                           published=0.95), indent=2))
 
 
