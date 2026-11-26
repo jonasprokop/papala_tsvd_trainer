@@ -18,6 +18,7 @@ from pathlib import Path
 import tempfile
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 
 from sinz_model.runtime import load_config, sha256_file
@@ -64,7 +65,71 @@ def _atomic_json(path, obj):
     temporary.replace(path)
 
 
-def _experiment(cfg, bundle, output_dir):
+def _shared_feature_bank(source_dir, target_dir, cfg, bundle, index,
+                         *, feature_spec):
+    """Bind a precomputed feature bank to identical images and model settings.
+
+    The returned directory is only read; fitted layers live in target_dir.
+    """
+    source_dir = Path(source_dir).resolve()
+    if source_dir == Path(target_dir).resolve():
+        raise ValueError('Feature source and target benchmark directories must differ')
+    manifest = source_dir / 'protocol.json'
+    source = json.loads(manifest.read_text())
+    old_cfg = source['source_config']
+    old_bc = old_cfg['model']['backbone']
+    bc = cfg['model']['backbone']
+    for field, default in (('kind', None), ('model_ref', None),
+                           ('pooling', 'mean'), ('input_mode', None),
+                           ('forward_mode', 'one_image'), ('cache_chunk_size', 256)):
+        if old_bc.get(field, default) != bc.get(field, default):
+            raise ValueError(f'Feature source has different ZWM {field}')
+    if tuple(source['layers']) != LAYERS:
+        raise ValueError('Feature source contains a different layer selection')
+    if (source['source_weights_sha256'] != feature_spec['weights_sha256'] or
+            source['source_predictor_sha256'] != feature_spec['predictor_sha256']):
+        raise ValueError('Feature source has different ZWM checkpoint or predictor code')
+    if (Path(old_cfg['data']['image_root']).resolve() !=
+            Path(cfg['data']['image_root']).resolve()):
+        raise ValueError('Feature source uses a different image root')
+
+    old_root = Path(old_cfg['data']['root'])
+    old_info = json.loads((old_root / 'dataset_info.json').read_text())
+    split_hash = bundle.info.get('split_sha256')
+    if not split_hash or old_info.get('split_sha256') != split_hash:
+        raise ValueError('Feature source and target image splits differ')
+    old_df = pd.read_csv(old_root / 'sample_index.csv',
+                         usecols=['stimulus_id', 'image_relative_path'])
+    if _images_index(old_df) != index:
+        raise ValueError('Feature source and target stimulus/image mappings differ')
+
+    fingerprint = source['cache_fingerprint']
+    # The original key also contains each image file's size and mtime. A
+    # matching path alone is insufficient if the image contents changed.
+    old_spec = dict(feature_spec, dataset_fingerprint=source['dataset_fingerprint'])
+    expected_fingerprint = hashlib.sha256(
+        json.dumps(old_spec, sort_keys=True).encode()).hexdigest()
+    if fingerprint != expected_fingerprint:
+        raise ValueError('Feature source fingerprint no longer matches image files/settings')
+    bank = source_dir / 'features' / fingerprint
+    chunk_size = int(bc.get('cache_chunk_size', 256))
+    if chunk_size < 1:
+        raise ValueError('cache_chunk_size must be positive')
+    expected = {f'{i:07d}.npz' for i in range(0, len(index), chunk_size)}
+    actual = {p.name for p in bank.glob('*.npz')}
+    if expected != actual:
+        missing = sorted(expected - actual)
+        raise FileNotFoundError(f'Incomplete shared feature bank {bank}: '
+                                f'{len(actual)}/{len(expected)} chunks; missing {missing[:3]}')
+    provenance = dict(source_result_dir=str(source_dir),
+                      source_protocol_sha256=sha256_file(str(manifest)),
+                      source_cache_fingerprint=fingerprint,
+                      source_feature_bank=str(bank),
+                      source_split_sha256=split_hash)
+    return bank, provenance
+
+
+def _experiment(cfg, bundle, output_dir, *, reuse_features_from=None):
     dc = cfg['data']; bc = cfg['model']['backbone']
     if bc['kind'] != 'zwm' or cfg['model']['family'] != 'transformer_neural':
         raise ValueError('Expected a ZWM transformer model')
@@ -109,19 +174,28 @@ def _experiment(cfg, bundle, output_dir):
                     source_weights_sha256=spec['weights_sha256'],
                     source_predictor_sha256=spec['predictor_sha256'],
                     source_config=cfg)
+    shared_bank = None
+    if reuse_features_from is not None:
+        shared_bank, provenance = _shared_feature_bank(
+            reuse_features_from, out, cfg, bundle, index,
+            feature_spec=spec)
+        protocol['feature_reuse'] = provenance
     if manifest.is_file():
         previous = json.loads(manifest.read_text())
         if previous != json.loads(json.dumps(protocol)):
             raise ValueError('Existing benchmark directory uses different data/settings')
     else:
         _atomic_json(manifest, protocol)
-    return out, index, fingerprint
+    return out, index, fingerprint, shared_bank
 
 
-def _chunks(out, index, key, cfg, *, extract):
+def _chunks(out, index, key, cfg, *, extract, shared_bank=None):
     """Load a validated, resumable 3D layer bank without a giant extra copy."""
-    folder = out / 'features' / key
-    folder.mkdir(parents=True, exist_ok=True)
+    if shared_bank is not None and extract:
+        raise ValueError('Cannot extract into a read-only shared feature bank')
+    folder = Path(shared_bank) if shared_bank is not None else out / 'features' / key
+    if shared_bank is None:
+        folder.mkdir(parents=True, exist_ok=True)
     stimuli = sorted(index)
     bc = cfg['model']['backbone']
     chunk_size = int(bc.get('cache_chunk_size', 256))
@@ -166,14 +240,15 @@ def _chunks(out, index, key, cfg, *, extract):
             extractor.close()
 
 
-def _load_layer(out, index, key, cfg, layer_idx):
+def _load_layer(out, index, key, cfg, layer_idx, *, shared_bank=None):
     mapping = {}
-    for names, vectors in _chunks(out, index, key, cfg, extract=False):
+    for names, vectors in _chunks(out, index, key, cfg, extract=False,
+                                  shared_bank=shared_bank):
         mapping.update(zip(names, vectors[:, layer_idx, :]))
     return mapping
 
 
-def _fit_layer(cfg, bundle, out, index, key, layer_idx):
+def _fit_layer(cfg, bundle, out, index, key, layer_idx, *, shared_bank=None):
     layer = LAYERS[layer_idx]
     dest = out / 'layers' / f'{layer_idx:02d}.npz'
     predictions_path = out / 'predictions' / f'{layer_idx:02d}.npz'
@@ -188,7 +263,8 @@ def _fit_layer(cfg, bundle, out, index, key, layer_idx):
             neuron_ids = np.asarray(_neuron_order(cfg, bundle)).astype(str)
             if not np.array_equal(saved_ids, neuron_ids):
                 raise ValueError(f'Saved layer has a different neuron order: {dest}')
-            features = _load_layer(out, index, key, cfg, layer_idx)
+            features = _load_layer(out, index, key, cfg, layer_idx,
+                                   shared_bank=shared_bank)
             test = bundle.test
             x_test = np.stack([features[s] for s in test.rows.stimulus_id])
             prediction = x_test @ weight.T + bias
@@ -197,7 +273,8 @@ def _fit_layer(cfg, bundle, out, index, key, layer_idx):
         else:
             print(f'Already fitted {layer}; leaving result unchanged')
         return
-    features = _load_layer(out, index, key, cfg, layer_idx)
+    features = _load_layer(out, index, key, cfg, layer_idx,
+                           shared_bank=shared_bank)
     train = bundle.full
     test = bundle.test
     x = np.stack([features[s] for s in train.rows.stimulus_id])
@@ -331,7 +408,12 @@ def main():
     parser.add_argument('--image', help='One actual THINGS image for --phase smoke')
     parser.add_argument('--layer-index', type=int,
                         help='0..11; required for fit; each CPU job fits one layer')
+    parser.add_argument('--reuse-features-from',
+                        help='Existing benchmark directory containing a verified read-only '
+                             'ZWM feature bank (fit phase only)')
     args = parser.parse_args()
+    if args.reuse_features_from and args.phase != 'fit':
+        parser.error('--reuse-features-from is only valid with --phase fit')
     cfg = load_config(args.config)
     if args.phase == 'smoke':
         if not args.image:
@@ -360,13 +442,15 @@ def main():
                                  not 0 <= args.layer_index < len(LAYERS)):
         parser.error('--phase fit requires --layer-index 0..11')
     bundle = TVSDTrainingBundle(cfg)
-    out, index, key = _experiment(cfg, bundle, args.output)
+    out, index, key, shared_bank = _experiment(
+        cfg, bundle, args.output, reuse_features_from=args.reuse_features_from)
     if args.phase == 'extract':
         for _ in _chunks(out,index,key,cfg,extract=True):
             pass
         print('All 12 layers cached; no ridge fitting or registry writes performed')
     else:
-        _fit_layer(cfg,bundle,out,index,key,args.layer_index)
+        _fit_layer(cfg,bundle,out,index,key,args.layer_index,
+                   shared_bank=shared_bank)
 
 
 if __name__ == '__main__':

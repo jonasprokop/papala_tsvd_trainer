@@ -1,5 +1,7 @@
 """Pure-CPU checks of the published BBScore ridge and split-half conventions."""
+import hashlib
 import inspect
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,6 +18,92 @@ from transformer_model.benchmark_stats import score_repeated_stimuli, finite_sum
 
 
 class ZWMPaperProtocolTests(unittest.TestCase):
+    @staticmethod
+    def _shared_bank_fixture(tmp):
+        root = Path(tmp)
+        source = root / 'ks4_results'
+        source_data = root / 'ks4_data'
+        target_data = root / 'mua_data'
+        image_root = root / 'images'
+        source_data.mkdir()
+        target_data.mkdir()
+        image_root.mkdir()
+        index = {'test:1': 'one.jpg', 'train:2': 'two.jpg'}
+        pd.DataFrame({'stimulus_id': list(index),
+                      'image_relative_path': list(index.values())}).to_csv(
+                          source_data/'sample_index.csv', index=False)
+        (source_data/'dataset_info.json').write_text(json.dumps({'split_sha256': 'same'}))
+        source_cfg = {'data': {'root': str(source_data), 'image_root': str(image_root)},
+                      'model': {'backbone': {'kind': 'zwm', 'model_ref': 'test.pt',
+                                             'pooling': 'mean', 'input_mode': 'rgb',
+                                             'cache_chunk_size': 256,
+                                             'forward_mode': 'one_image'}}}
+        target_cfg = json.loads(json.dumps(source_cfg))
+        target_cfg['data']['root'] = str(target_data)
+        feature_spec = {'dataset_fingerprint': 'mua-fingerprint',
+                        'weights_sha256': 'weights',
+                        'predictor_sha256': 'predictor',
+                        'images': {'test:1': ['one.jpg', 12, 20],
+                                   'train:2': ['two.jpg', 12, 20]}}
+        fingerprint = hashlib.sha256(json.dumps(
+            dict(feature_spec, dataset_fingerprint='ks4-fingerprint'),
+            sort_keys=True).encode()).hexdigest()
+        protocol = {'source_config': source_cfg,
+                    'source_weights_sha256': 'weights',
+                    'source_predictor_sha256': 'predictor',
+                    'layers': list(benchmark.LAYERS),
+                    'dataset_fingerprint': 'ks4-fingerprint',
+                    'cache_fingerprint': fingerprint}
+        source.mkdir()
+        (source/'protocol.json').write_text(json.dumps(protocol))
+        bank = source/'features'/fingerprint
+        bank.mkdir(parents=True)
+        chunk = bank/'0000000.npz'
+        np.savez_compressed(chunk, stimulus_ids=list(sorted(index)),
+                            features=np.ones((2, len(benchmark.LAYERS), 3)))
+        return source, root/'mua_results', target_cfg, index, chunk, feature_spec
+
+    def test_shared_feature_bank_is_read_only_and_validates_both_cohorts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target, cfg, index, chunk, spec = self._shared_bank_fixture(tmp)
+            bundle = SimpleNamespace(info={'split_sha256': 'same'})
+            bank, provenance = benchmark._shared_feature_bank(
+                source, target, cfg, bundle, index, feature_spec=spec)
+            self.assertEqual(provenance['source_cache_fingerprint'], bank.name)
+            before = chunk.stat().st_mtime_ns
+            chunks = list(benchmark._chunks(target, index, 'different-mua-key', cfg,
+                                            extract=False, shared_bank=bank))
+            self.assertEqual(chunks[0][0], sorted(index))
+            self.assertEqual(chunks[0][1].shape, (2, len(benchmark.LAYERS), 3))
+            self.assertEqual(chunk.stat().st_mtime_ns, before)
+            self.assertFalse(target.exists())
+            with self.assertRaisesRegex(ValueError, 'read-only'):
+                list(benchmark._chunks(target, index, 'different-mua-key', cfg,
+                                       extract=True, shared_bank=bank))
+
+    def test_shared_features_reject_stale_data_model_or_missing_chunk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target, cfg, index, chunk, spec = self._shared_bank_fixture(tmp)
+            bundle = SimpleNamespace(info={'split_sha256': 'same'})
+
+            def validate(*, given_spec=spec, mapping=index):
+                return benchmark._shared_feature_bank(
+                    source, target, cfg, bundle, mapping, feature_spec=given_spec)
+
+            with self.assertRaisesRegex(ValueError, 'checkpoint'):
+                validate(given_spec=dict(spec, weights_sha256='different'))
+            with self.assertRaisesRegex(ValueError, 'mappings'):
+                validate(mapping={'test:1': 'wrong.jpg', 'train:2': 'two.jpg'})
+            with self.assertRaisesRegex(ValueError, 'fingerprint'):
+                validate(given_spec=dict(spec, images={'test:1': ['one.jpg', 12, 21]}))
+            bundle.info['split_sha256'] = 'changed'
+            with self.assertRaisesRegex(ValueError, 'splits differ'):
+                validate()
+            bundle.info['split_sha256'] = 'same'
+            chunk.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, 'Incomplete'):
+                validate()
+
     def test_per_layer_predictions_are_saved_and_replay_without_refit(self):
         features = dict(zip(('train:1', 'train:2', 'test:1', 'test:2'),
                             (np.array([1., 0.]), np.array([0., 1.]),
