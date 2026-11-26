@@ -1,0 +1,53 @@
+#!/bin/bash
+#PBS -N zwm_mua_spatial
+#PBS -q gpu
+#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_cap=compute_80:gpu_mem=16gb:scratch_local=5gb
+#PBS -l walltime=08:00:00
+
+set -euo pipefail
+ROOT=/storage/brno2/home/jonas_prokop/visual_models
+CODE="$ROOT/code/papala_tsvd_trainer"
+SIF="$ROOT/containers/tvsd-bookworm.sif"
+PY=/mnt/tvsd/envs/zwm-py310/bin/python
+OUT=/mnt/tvsd/results/zwm_v1_paper_mua_spatial_pilot_512
+: "${PBS_JOBID:?Submit via qsub}"
+test -f "$SIF" && test -x "$ROOT/envs/zwm-py310/bin/python"
+test -f "$ROOT/code/ZWM/out/awwkl/zwm-bvd-170m/model.pt"
+test -f "$ROOT/code/bbscore_public/metrics/utils.py" || {
+  echo 'Clone neuroailab/bbscore_public into $ROOT/code/bbscore_public first' >&2
+  exit 2
+}
+mkdir -p "$ROOT/logs"
+exec > "$ROOT/logs/zwm_mua_spatial.${PBS_JOBID}.log" 2>&1
+export SINGULARITYENV_PYTHONPATH=/project:/mnt/tvsd/code/ZWM
+export SINGULARITYENV_PYTHONDONTWRITEBYTECODE=1
+export SINGULARITYENV_HF_HUB_OFFLINE=1
+export SINGULARITYENV_TRANSFORMERS_OFFLINE=1
+export SINGULARITYENV_HF_HOME=/mnt/tvsd/cache/huggingface
+export SINGULARITYENV_OPENBLAS_NUM_THREADS=4
+export SINGULARITYENV_OMP_NUM_THREADS=4
+export SINGULARITYENV_MKL_NUM_THREADS=4
+export SINGULARITYENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+# MetaCentrum can expose GPU UUIDs while the container expects integer indices.
+if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* && "${CUDA_VISIBLE_DEVICES}" != *,* ]]; then
+  index=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | \
+          awk -F, -v uuid="$CUDA_VISIBLE_DEVICES" '{gsub(/^[ \t]+|[ \t]+$/, "", $1);gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($2==uuid) print $1}')
+  [[ "$index" =~ ^[0-9]+$ ]] || { echo 'Cannot resolve PBS GPU UUID' >&2; exit 4; }
+  export SINGULARITYENV_CUDA_VISIBLE_DEVICES="$index"
+fi
+
+for phase in extract fit; do
+  echo "START ${phase}: $(date -Is) host=$(hostname)"
+  singularity exec --nv \
+    --bind "$CODE:/project" \
+    --bind "$ROOT:/mnt/tvsd" \
+    --pwd /mnt/tvsd/code/ZWM \
+    "$SIF" "$PY" -m transformer_model.benchmark_spatial_pilot \
+    --phase "$phase" \
+    --config /project/configs/tvsd_zwm_paper_mua_v1.yaml \
+    --output "$OUT" \
+    --bbscore-utils /mnt/tvsd/code/bbscore_public/metrics/utils.py \
+    --n-train 512 --layer-index 3
+  echo "FINISH ${phase}: $(date -Is)"
+done
