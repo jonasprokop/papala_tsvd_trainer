@@ -208,6 +208,18 @@ class TrainingPruned(Exception):
     """Training stopped deliberately by an external epoch callback."""
 
 
+def _response_objective(cfg, dataset_info=None):
+    """Validate the opt-in signed MUA objective before creating a run."""
+    objective = str(cfg["training"]["loss"].get("kind", "poisson"))
+    activation = str(cfg["model"]["output"].get("activation", "elu"))
+    if (objective, activation) not in (("poisson", "elu"), ("mse", "identity")):
+        raise ValueError("Use Poisson + ELU for counts, or MSE + identity for signed targets")
+    if (dataset_info or {}).get("signal_type") == "normalized_MUA" and objective != "mse":
+        raise ValueError("Papale normalized MUA contains signed values; "
+                         "set training.loss.kind=mse and model.output.activation=identity")
+    return objective
+
+
 def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=None,notes=None,
                  resume_run_id:Optional[str]=None,dry_run=False,limit_train_batches=None,
                  limit_val_batches=None,evaluate_test=True,
@@ -232,12 +244,14 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
     if is_tvsd:
         from .tvsd_data import TVSDTrainingBundle
         bundle = TVSDTrainingBundle(cfg)
+        loss_kind = _response_objective(cfg, bundle.info)
         full, test = bundle.full, bundle.test
         normalization_stats = bundle.normalization_stats
         dfp = bundle.fingerprint
         mapping = bundle.mapping
         print("TVSD frozen partition and grayscale normalization:", normalization_stats)
     else:
+        loss_kind = _response_objective(cfg)
         rc=dc["response"]
         pc_base=PreprocessConfig.from_dict(dc["preprocessing"])
         store=ImageStore(str(Path(dc["root"])/dc["images_subdir"]),dc["image_filename_pattern"],dc["image_id_offset"])
@@ -366,27 +380,34 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
                 z=training_loss(model,pred,y,m,gamma,
                                 dataset_size=len(trds),
                                 batch_size=int(y.shape[0]),
-                                eps=eps)
+                                eps=eps, objective=loss_kind)
                 if not torch.isfinite(z["loss"]):
                     diagnostic = _nonfinite_loss_report(
                         run_dir, model, x, y, m, pred, z, epoch, bi, phase, gamma)
                     raise FloatingPointError(
                         f"non-finite loss e{epoch} b{bi}; diagnostic={diagnostic}")
-                z["loss"].backward(); opt.step(); lv=float(z["loss"].detach().cpu()); pv=float(z["poisson"].detach().cpu())
-                ls+=lv; ps+=pv; nb+=1; step+=1
-                inner.set_postfix(loss=f"{lv:.4f}",pois=f"{pv:.4f}",lr=f"{opt.param_groups[0]['lr']:.1e}",gpu=gpu_memory_gb())
+                z["loss"].backward(); opt.step()
+                lv=float(z["loss"].detach().cpu())
+                dv=float(z["data_loss"].detach().cpu())
+                ls+=lv; ps+=dv; nb+=1; step+=1
+                inner.set_postfix(loss=f"{lv:.4f}",
+                                  **{("pois" if loss_kind == "poisson" else "mse"): f"{dv:.4f}"},
+                                  lr=f"{opt.param_groups[0]['lr']:.1e}",gpu=gpu_memory_gb())
                 hb=int(cfg["training"]["progress"]["heartbeat_every_batches"])
                 if hb>0 and step%hb==0:
                     reg.update_progress(run_id,phase,epoch,bi+1,len(loader),step,
                         (epoch+(bi+1)/max(len(loader),1))/int(cfg["training"]["total_epochs"]),
-                        lv,pv,float(opt.param_groups[0]["lr"]),None if best==-math.inf else best,best_epoch,
+                        lv,dv if loss_kind == "poisson" else None,
+                        float(opt.param_groups[0]["lr"]),None if best==-math.inf else best,best_epoch,
                         time.monotonic()-wall,timing.eta(int(cfg["training"]["total_epochs"])-epoch-1),
                         str(latestp) if latestp.exists() else None)
             inner.close()
             if nb==0: raise RuntimeError("zero training batches")
             _,vs=_validation_corr(model,vloader,device,limit_val_batches)
             ml,mp,lr=ls/nb,ps/nb,float(opt.param_groups[0]["lr"])
-            reg.log_epoch(run_id,epoch,phase,ml,mp,vs["mean"],vs["median"],lr)
+            reg.log_epoch(run_id,epoch,phase,ml,
+                          mp if loss_kind == "poisson" else None,
+                          vs["mean"],vs["median"],lr)
             phase_improved=np.isfinite(vs["mean"]) and vs["mean"]>phase_best
             global_improved=np.isfinite(vs["mean"]) and vs["mean"]>best
             if phase_improved:
@@ -405,7 +426,9 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
             else:
                 new_lr=old_lr
             metric_state={"val_corr_mean":vs["mean"],"val_corr_median":vs["median"],
-                          "train_loss":ml,"global_step":step,"bad_epochs":bad_epochs,
+                          "train_loss":ml,"train_data_loss":mp,
+                          "train_data_loss_kind":loss_kind,
+                          "global_step":step,"bad_epochs":bad_epochs,
                           "lr_decays":lr_decays,"phase_best":phase_best}
             if phase_improved:
                 save_checkpoint(str(phase_bestp),model,opt,epoch,phase,run_id,cfg,split.sha256,capture_rng_state(),
@@ -435,7 +458,8 @@ def train_member(cfg:Dict[str,Any],member_index:int,candidate_id:Optional[str]=N
                 shutil.copy2(latestp,ap); reg.log_artifact(run_id,"checkpoint_archive",str(ap))
             sec=time.monotonic()-estart; timing.add(sec); eta=timing.eta(int(cfg["training"]["total_epochs"])-epoch-1)
             reg.update_progress(run_id,phase,epoch,nb,len(loader),step,(epoch+1)/int(cfg["training"]["total_epochs"]),
-                ml,mp,lr,None if best==-math.inf else best,best_epoch,time.monotonic()-wall,eta,str(latestp))
+                ml,mp if loss_kind == "poisson" else None,
+                lr,None if best==-math.inf else best,best_epoch,time.monotonic()-wall,eta,str(latestp))
             outer.set_postfix(val_r=f"{vs['mean']:.4f}",best="--" if best_epoch is None else f"{best:.4f}@{best_epoch+1}",
                               lr=f"{new_lr:.1e}",decays=lr_decays,
                               epoch_t=format_seconds(sec),ETA=format_seconds(eta))

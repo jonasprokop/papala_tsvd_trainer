@@ -72,11 +72,17 @@ def _experiment(cfg, bundle, output_dir):
         raise ValueError('This comparison targets published ZWM 170M weights')
     if bc['input_mode'] != 'rgb':
         raise ValueError('BBScore presents original RGB images; set input_mode: rgb')
-    if bundle.widths != {'F': 804, 'N': 369}:
-        raise ValueError('Unexpected TVSD V1 F/N tracked cohort')
     info = bundle.info
-    if info['version'] != 'tvsd_tracked_neurons_masked_v3':
-        raise ValueError('Frozen dataset version changed')
+    expected = {
+        'tvsd_tracked_neurons_masked_v3': {'F': 804, 'N': 369},
+        'tvsd_papale_normmua_v1': {'F': 512, 'N': 512},
+    }
+    version = info.get('version')
+    if version not in expected or bundle.widths != expected[version]:
+        raise ValueError('Unsupported or inconsistent V1 TVSD cohort')
+    if version == 'tvsd_papale_normmua_v1' and (
+            info.get('signal_type') != 'normalized_MUA' or info.get('area') != 'V1'):
+        raise ValueError('Papale MUA adapter is not a V1 normalized-MUA cohort')
     index = _images_index(bundle.df)
     img_root = Path(dc['image_root'])
     source = {}
@@ -95,10 +101,10 @@ def _experiment(cfg, bundle, output_dir):
     out = Path(output_dir)
     manifest = out / 'protocol.json'
     protocol = dict(cache_fingerprint=fingerprint, benchmark='TVSDV1', animals=['F','N'],
-                    n_neurons=1173, layers=LAYERS, alphas=ALPHAS,
+                    n_neurons=sum(bundle.widths.values()), layers=LAYERS, alphas=ALPHAS,
                     inner_cv_folds=N_FOLDS, ceiling_splits=N_CEILING_SPLITS,
                     alpha_grid_source='neuroailab/bbscore_public metrics/ridge.py',
-                    source_dataset='tvsd_tracked_neurons_masked_v3',
+                    source_dataset=version,
                     dataset_fingerprint=bundle.fingerprint,
                     source_weights_sha256=spec['weights_sha256'],
                     source_predictor_sha256=spec['predictor_sha256'],
@@ -170,8 +176,26 @@ def _load_layer(out, index, key, cfg, layer_idx):
 def _fit_layer(cfg, bundle, out, index, key, layer_idx):
     layer = LAYERS[layer_idx]
     dest = out / 'layers' / f'{layer_idx:02d}.npz'
+    predictions_path = out / 'predictions' / f'{layer_idx:02d}.npz'
     if dest.exists():
-        print(f'Already fitted {layer}; leaving result unchanged')
+        if not predictions_path.exists():
+            # Existing completed layers predate the trial-level prediction
+            # handoff. Replay their saved readout without fitting again.
+            with np.load(dest, allow_pickle=False) as previous:
+                weight = previous['weight']
+                bias = previous['bias']
+                saved_ids = previous['neuron_ids'].astype(str)
+            neuron_ids = np.asarray(_neuron_order(cfg, bundle)).astype(str)
+            if not np.array_equal(saved_ids, neuron_ids):
+                raise ValueError(f'Saved layer has a different neuron order: {dest}')
+            features = _load_layer(out, index, key, cfg, layer_idx)
+            test = bundle.test
+            x_test = np.stack([features[s] for s in test.rows.stimulus_id])
+            prediction = x_test @ weight.T + bias
+            _save_test_predictions(predictions_path, layer, test, prediction, neuron_ids)
+            print(f'Replayed held-out predictions from saved {layer} fit; no refitting')
+        else:
+            print(f'Already fitted {layer}; leaving result unchanged')
         return
     features = _load_layer(out, index, key, cfg, layer_idx)
     train = bundle.full
@@ -208,17 +232,64 @@ def _fit_layer(cfg, bundle, out, index, key, layer_idx):
     scoring = score_repeated_stimuli(prediction, test.responses, test.mask,
                                       test.image_ids, splits=N_CEILING_SPLITS,
                                       seed=FOLD_SEED)
+    neuron_ids = np.asarray(_neuron_order(cfg, bundle)).astype(str)
     # The learned linear map is an independent artifact for Classical Experiments.
-    payload = dict(layer=np.asarray(layer), neuron_ids=np.asarray(_neuron_order(cfg,bundle)),
+    payload = dict(layer=np.asarray(layer), neuron_ids=neuron_ids,
                    **fit,
                    **scoring)
+    # Persist trial-level inputs for all protocol scorers. Write this BEFORE
+    # the layer completion marker so interrupted jobs can safely resume.
+    _save_test_predictions(predictions_path, layer, test, prediction, neuron_ids)
     _atomic_npz(dest, **payload)
     summary = finite_summary(scoring['noise_corrected_pearson'])
     print(f'Finished {layer}: score={summary["mean"]}, valid={summary["n_valid"]}',flush=True)
 
 
+def _save_test_predictions(path, layer, test, prediction, neuron_ids):
+    """Lossless held-out replay for Cadena, Brain-Score and measured MUA reliability.
+
+    Group IDs describe the readout columns; session IDs describe presentations.
+    Neither may be inferred from the other's axis.
+    """
+    neuron_ids = np.asarray(neuron_ids).astype(str)
+    prediction = np.asarray(prediction)
+    if prediction.shape != test.responses.shape or prediction.shape != test.mask.shape:
+        raise ValueError('Held-out predictions and neural trial arrays disagree')
+    if (len(neuron_ids) != prediction.shape[1] or
+            len(set(neuron_ids)) != len(neuron_ids)):
+        raise ValueError('Held-out neuron IDs do not match prediction columns')
+    groups = np.asarray([name.split('/')[0] for name in neuron_ids])
+    if not np.isin(groups, ('F', 'N')).all():
+        raise ValueError('Expected F/N neuron IDs for TVSD V1')
+    if len(test.rows) != prediction.shape[0] or len(test.image_ids) != prediction.shape[0]:
+        raise ValueError('Test stimulus metadata and prediction rows disagree')
+    values = dict(layer=np.asarray(layer), prediction=prediction,
+                  response=test.responses, mask=test.mask, image_id=test.image_ids,
+                  neuron_ids=neuron_ids, groups=groups,
+                  session=test.rows.session.to_numpy(dtype=str))
+    if path.exists():
+        # An interrupted run may have written predictions but not its layer
+        # completion marker. Reuse only an exact match; never silently replace.
+        with np.load(path, allow_pickle=False) as previous:
+            identical = set(previous.files) == set(values)
+            if identical:
+                for name, expected in values.items():
+                    actual = previous[name]
+                    same = (np.array_equal(actual, expected, equal_nan=True)
+                            if expected.dtype.kind in 'fc' else np.array_equal(actual, expected))
+                    if not same:
+                        identical = False
+                        break
+        if not identical:
+            raise FileExistsError(f'Existing held-out predictions differ: {path}')
+        return
+    _atomic_npz(path, **values)
+
+
 def _report(out):
     rows = []
+    protocol = json.loads((out/'protocol.json').read_text())
+    expected_neurons = int(protocol['n_neurons'])
     for i, layer in enumerate(LAYERS):
         path = out / 'layers' / f'{i:02d}.npz'
         if not path.is_file():
@@ -228,7 +299,7 @@ def _report(out):
             score = data['noise_corrected_pearson']
             raw = data['raw_pearson']
             n_images = data['n_repeated_images']
-            if len(ids) != 1173 or len(set(ids)) != 1173:
+            if len(ids) != expected_neurons or len(set(ids)) != expected_neurons:
                 raise ValueError(f'Invalid neuron cohort for {layer}')
         rows.append(dict(layer=layer, noise_corrected=finite_summary(score),
                          raw_pearson=finite_summary(raw),
@@ -238,12 +309,15 @@ def _report(out):
         raise RuntimeError('No valid split-half-corrected V1 scores')
     best = max(eligible, key=lambda item:item['noise_corrected']['mean'])
     report = dict(benchmark='TVSDV1', model='ZWM 170M',
+                  source_dataset=protocol['source_dataset'],
                   published_best_layer_score=0.95,
                   published_value_source='Aw et al., Table S25',
                   best_layer=best['layer'], best_score=best['noise_corrected']['mean'],
-                  layers=rows, caveat=('Same architecture/metric parameters, but the local '
-                  '1173 tracked neurons and frozen response windows are not the '
-                  'original BBScore V1 channel-level benchmark data.'))
+                  layers=rows, caveat=('Original BBScore normalized MUA targets; '
+                  'the exact ZWM feature wrapper/pooling is still unverified.' if
+                  protocol['source_dataset'] == 'tvsd_papale_normmua_v1' else
+                  'Tracked sorted units, not the original BBScore MUA targets. '
+                  'Pooling and paper layer selection remain unverified.'))
     _atomic_json(out/'summary.json', report)
     print(json.dumps(dict(best_layer=report['best_layer'],best_score=report['best_score'],
                           published=0.95), indent=2))

@@ -1,15 +1,63 @@
 """Pure-CPU checks of the published BBScore ridge and split-half conventions."""
 import inspect
+from pathlib import Path
+import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 from sklearn.linear_model import RidgeCV
 
+from transformer_model import benchmark_v1 as benchmark
 from transformer_model.benchmark_probe import BB_SCORE_ALPHAS, fit_masked_bbscore
 from transformer_model.benchmark_stats import score_repeated_stimuli, finite_summary
 
 
 class ZWMPaperProtocolTests(unittest.TestCase):
+    def test_per_layer_predictions_are_saved_and_replay_without_refit(self):
+        features = dict(zip(('train:1', 'train:2', 'test:1', 'test:2'),
+                            (np.array([1., 0.]), np.array([0., 1.]),
+                             np.array([2., 3.]), np.array([4., 5.]))))
+        train = SimpleNamespace(
+            rows=pd.DataFrame({'stimulus_id': ['train:1', 'train:2']}),
+            responses=np.zeros((2, 2)), mask=np.ones((2, 2), dtype=bool))
+        test = SimpleNamespace(
+            rows=pd.DataFrame({'stimulus_id': ['test:1', 'test:2', 'test:1', 'test:2'],
+                               'animal': ['F', 'F', 'N', 'N'],
+                               'session': ['macaqueF', 'macaqueF', 'macaqueN', 'macaqueN']}),
+            responses=np.array([[.2, 0], [.3, 0], [0, -.4], [0, -.5]]),
+            mask=np.array([[1, 0], [1, 0], [0, 1], [0, 1]], dtype=bool),
+            image_ids=np.array([1, 2, 1, 2]))
+        bundle = SimpleNamespace(full=train, test=test)
+        fit = dict(weight=np.array([[1., 0.], [0., 2.]]), bias=np.array([0., -1.]),
+                   alpha=np.ones(2), cv_pearson=np.array([.1, .2]))
+        scoring = dict(noise_corrected_pearson=np.array([.4, .5]))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with patch.object(benchmark, '_load_layer', return_value=features), \
+                 patch.object(benchmark, '_neuron_order', return_value=['F/0', 'N/0']), \
+                 patch.object(benchmark, 'fit_masked_bbscore', return_value=fit) as fitter, \
+                 patch.object(benchmark, 'score_repeated_stimuli', return_value=scoring):
+                benchmark._fit_layer({}, bundle, out, {}, 'fingerprint', 0)
+                self.assertEqual(fitter.call_count, 1)
+                path = out/'predictions'/'00.npz'
+                with np.load(path, allow_pickle=False) as saved:
+                    self.assertEqual(set(('prediction', 'response', 'mask', 'image_id',
+                                          'neuron_ids', 'groups', 'session')) - set(saved.files), set())
+                    np.testing.assert_array_equal(saved['prediction'],
+                                                  [[2., 5.], [4., 9.], [2., 5.], [4., 9.]])
+                    np.testing.assert_array_equal(saved['response'], test.responses)
+                    np.testing.assert_array_equal(saved['mask'], test.mask)
+                    np.testing.assert_array_equal(saved['neuron_ids'], ['F/0', 'N/0'])
+                    np.testing.assert_array_equal(saved['groups'], ['F', 'N'])
+                    np.testing.assert_array_equal(saved['session'], test.rows.session)
+                path.unlink()  # Simulate an earlier completed layer without saved predictions.
+                benchmark._fit_layer({}, bundle, out, {}, 'fingerprint', 0)
+                self.assertEqual(fitter.call_count, 1)  # Replay, never refit.
+                self.assertTrue(path.exists())
+
     @unittest.skipUnless('alpha_per_target' in inspect.signature(RidgeCV).parameters,
                          'BBScore RidgeCV requires the ZWM Python 3.10 environment')
     def test_complete_cohort_matches_unmodified_bbscore_ridgecv(self):

@@ -53,6 +53,36 @@ def historical_poisson_nll(
     return scale * (term * mask.to(dtype=term.dtype)).sum()
 
 
+def masked_mse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Mean squared error on observed channels, with equal sample weights."""
+    if prediction.shape != target.shape or target.shape != mask.shape:
+        raise ValueError("prediction, target and mask must have identical shapes")
+    term = (prediction - target).square()
+    weight = mask.to(dtype=term.dtype)
+    per_sample_den = weight.sum(dim=1).clamp_min(1.0)
+    return ((term * weight).sum(dim=1) / per_sample_den).mean()
+
+
+def historical_mse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    dataset_size: int,
+    batch_size: int,
+) -> torch.Tensor:
+    """MUA data term with the existing sqrt(N/B) batch-sum convention."""
+    if prediction.shape != target.shape or target.shape != mask.shape:
+        raise ValueError("prediction, target and mask must have identical shapes")
+    if dataset_size <= 0 or batch_size <= 0:
+        raise ValueError("dataset_size and batch_size must be positive")
+    scale = (float(dataset_size) / float(batch_size)) ** 0.5
+    return scale * ((prediction - target).square() * mask.to(prediction.dtype)).sum()
+
+
 def training_loss(
     model,
     prediction: torch.Tensor,
@@ -62,23 +92,32 @@ def training_loss(
     dataset_size: int | None = None,
     batch_size: int | None = None,
     eps: float = 1.0e-8,
+    objective: str = "poisson",
 ) -> Dict[str, torch.Tensor]:
+    if objective not in ("poisson", "mse"):
+        raise ValueError(f"Unknown training loss objective: {objective!r}")
     if dataset_size is None or batch_size is None:
-        poisson = masked_poisson_nll(prediction, target, mask, eps=eps)
+        data_loss = (masked_poisson_nll(prediction, target, mask, eps=eps)
+                     if objective == "poisson" else masked_mse(prediction, target, mask))
         feature_l1 = model.readout.feature_l1(average=True)
     else:
-        poisson = historical_poisson_nll(
-            prediction, target, mask, dataset_size, batch_size, eps=eps
-        )
+        data_loss = (historical_poisson_nll(
+            prediction, target, mask, dataset_size, batch_size, eps=eps)
+            if objective == "poisson" else historical_mse(
+                prediction, target, mask, dataset_size, batch_size))
         feature_l1 = model.readout.feature_l1(average=False)
     regularizer = float(gamma_readout) * feature_l1
-    total = poisson + regularizer
-    return {
+    total = data_loss + regularizer
+    result = {
         "loss": total,
-        "poisson": poisson,
+        "data_loss": data_loss,
         "feature_l1": feature_l1,
         "regularizer": regularizer,
     }
+    # The legacy Poisson key remains unchanged for every existing experiment;
+    # normalized MUA does not acquire a misleading field named "poisson".
+    result[objective] = data_loss
+    return result
 
 
 # ---------------------------------------------------------------------------

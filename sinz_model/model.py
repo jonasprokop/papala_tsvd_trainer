@@ -403,6 +403,9 @@ class SinzV1Model(nn.Module):
         else:
             raise ValueError("Unknown model.readout.type %r" % readout_type)
         self.elu_offset = float(model_cfg["output"]["elu_offset"])
+        self.output_activation = str(model_cfg["output"].get("activation", "elu"))
+        if self.output_activation not in ("elu", "identity"):
+            raise ValueError("model.output.activation must be 'elu' or 'identity'")
 
     def forward(
         self,
@@ -411,6 +414,8 @@ class SinzV1Model(nn.Module):
     ) -> torch.Tensor:
         x = self.core(x)
         x = self.readout(x, sample=sample)
+        if self.output_activation == "identity":
+            return x
         return F.elu(x + self.elu_offset) + 1.0
 
     def regularizer(self, gamma_readout: float) -> torch.Tensor:

@@ -235,6 +235,20 @@ def summarize_protocols(scores, groups=None, measured_reliab=None,
     bb, n_bb = _stat(bb_all, np.median)
     att, n_att = _stat(scores['pearson_noise_corrected'], np.median)
 
+    measured_check = None
+    if measured_reliab is not None:
+        # Informational: Papale's all-pairs reliab vs our recomputed balanced
+        # estimate on the same repeats (random pairing, 10 subsamples). Not a
+        # gate: it is the real-data counterpart of verify_papale_reliab.py.
+        rec = np.asarray(scores['papale_reliab_balanced_adapted'], float)
+        both = np.isfinite(filter_reliab) & np.isfinite(rec)
+        d = filter_reliab[both] - rec[both]
+        measured_check = dict(n_compared=int(both.sum()),
+                              median_diff=float(np.median(d)) if len(d) else None,
+                              median_abs_diff=float(np.median(np.abs(d))) if len(d) else None,
+                              corr=(float(np.corrcoef(filter_reliab[both], rec[both])[0, 1])
+                                    if both.sum() > 2 and np.std(filter_reliab[both]) > 0
+                                    and np.std(rec[both]) > 0 else None))
     rel1 = filter_reliab
     recomputed = np.asarray(scores['papale_reliab_balanced_adapted'], float)
     reliability = dict(
@@ -243,6 +257,7 @@ def summarize_protocols(scores, groups=None, measured_reliab=None,
         # The vector actually used for the >0.3 filter and n_above.
         filter_reliability_source=reliability_source,
         export_vs_recomputed=export_check,
+        measured_vs_recomputed=measured_check,
         filter_reliability_median=_stat(rel1, np.median)[0],
         papale_oracle_balanced_adapted_median=_stat(scores['papale_oracle_balanced_adapted'], np.median)[0],
         papale_balanced_k_median=float(np.median(scores['papale_balanced_k'])),
@@ -332,6 +347,9 @@ def main():
                              'Papale balanced reliability always uses 10 subsamples')
     parser.add_argument('--reliability-export-dir', type=Path,
                         help='Reconstructed tracked-unit reliability export (adapted, not MUA)')
+    parser.add_argument('--measured-reliability', action='store_true',
+                        help='Normalized-MUA cohort: bind Papale\'s released reliab from '
+                             '--prepared-root/neuron_index.csv (yields brainscore_current)')
     parser.add_argument('--prepared-root', type=Path,
                         help='Required with --reliability-export-dir for frozen dataset provenance checks')
     parser.add_argument('--widths', help='JSON like {"F":804,"N":369}; columns in F|N order. '
@@ -355,6 +373,13 @@ def main():
         if ids is None and args.widths:
             w = json.loads(args.widths)
             ids = np.array([f'{a}/{i}' for a in ('F', 'N') for i in range(int(w[a]))])
+        if args.measured_reliability:
+            if args.reliability_export_dir:
+                parser.error('--measured-reliability and --reliability-export-dir are exclusive')
+            if args.prepared_root is None or ids is None:
+                parser.error('--measured-reliability needs --prepared-root and neuron IDs')
+            from .reliability_binding import load_measured_reliability
+            measured = load_measured_reliability(args.prepared_root, ids)
         if args.reliability_export_dir:
             if args.prepared_root is None or ids is None:
                 parser.error('--reliability-export-dir needs --prepared-root and neuron IDs/--widths')
