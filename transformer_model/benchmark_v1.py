@@ -23,7 +23,8 @@ from PIL import Image
 
 from sinz_model.runtime import load_config, sha256_file
 from sinz_model.tvsd_data import TVSDTrainingBundle
-from .benchmark_stats import (bbscore_floor_corrected_scores, finite_summary,
+from .benchmark_stats import (bbscore_floor_corrected_scores,
+                              bbscore_transform_pearson, finite_summary,
                               score_repeated_stimuli)
 from .train import _images_index, _neuron_order, _safe_image
 from .benchmark_probe import BB_SCORE_ALPHAS, fit_masked_bbscore
@@ -377,12 +378,16 @@ def _report(out):
             score = data['noise_corrected_pearson']
             raw = data['raw_pearson']
             n_images = data['n_repeated_images']
+            reliability = data['split_half_reliability']
             bbscore_floor = bbscore_floor_corrected_scores(
-                data['bbscore_pearson'], data['split_half_reliability'])
+                data['bbscore_pearson'], reliability)
+            cv_bbscore_floor = bbscore_floor_corrected_scores(
+                bbscore_transform_pearson(data['cv_pearson']), reliability)
             if len(ids) != expected_neurons or len(set(ids)) != expected_neurons:
                 raise ValueError(f'Invalid neuron cohort for {layer}')
         rows.append(dict(layer=layer, noise_corrected=finite_summary(score),
                          bbscore_floor=finite_summary(bbscore_floor),
+                         cv_bbscore_floor=finite_summary(cv_bbscore_floor),
                          raw_pearson=finite_summary(raw),
                          eligible_neurons=int(np.count_nonzero(n_images >= 20))))
     eligible = [row for row in rows if row['noise_corrected']['mean'] is not None]
@@ -393,6 +398,9 @@ def _report(out):
     floor_eligible = [row for row in rows if row['bbscore_floor']['median'] is not None]
     best_floor = max(floor_eligible,
                      key=lambda item:item['bbscore_floor']['median']) if floor_eligible else None
+    cv_eligible = [row for row in rows if row['cv_bbscore_floor']['median'] is not None]
+    best_cv = max(cv_eligible,
+                  key=lambda item:item['cv_bbscore_floor']['median']) if cv_eligible else None
     report = dict(benchmark='TVSDV1', model='ZWM 170M',
                   source_dataset=protocol['source_dataset'],
                   published_best_layer_score=0.95,
@@ -403,8 +411,15 @@ def _report(out):
                   best_bbscore_floor_layer=best_floor['layer'] if best_floor else None,
                   best_bbscore_floor_score=(best_floor['bbscore_floor']['median']
                                             if best_floor else None),
+                  best_cv_bbscore_floor_layer=best_cv['layer'] if best_cv else None,
+                  best_cv_bbscore_floor_score=(best_cv['cv_bbscore_floor']['median']
+                                               if best_cv else None),
                   bbscore_floor_note=('BBScore 1e-6 ceiling floor applied to the saved '
                       'split-half estimates; the original BBScore RNG was not rerun.'),
+                  cv_bbscore_note=('Diagnostic only: per-neuron Pearson correlations of '
+                      'pooled out-of-fold training predictions, BBScore-transformed and '
+                      'divided by ceilings estimated on the separate 100 repeated test images. '
+                      'This is not the mean of per-fold medians.'),
                   layers=rows, caveat=('Original BBScore normalized MUA targets; '
                   'the exact ZWM feature wrapper/pooling is still unverified.' if
                   protocol['source_dataset'] == 'tvsd_papale_normmua_v1' else
@@ -417,6 +432,8 @@ def _report(out):
                           best_median_score=report['best_median_score'],
                           best_bbscore_floor_layer=report['best_bbscore_floor_layer'],
                           best_bbscore_floor_score=report['best_bbscore_floor_score'],
+                          best_cv_bbscore_floor_layer=report['best_cv_bbscore_floor_layer'],
+                          best_cv_bbscore_floor_score=report['best_cv_bbscore_floor_score'],
                           published=0.95), indent=2))
 
 

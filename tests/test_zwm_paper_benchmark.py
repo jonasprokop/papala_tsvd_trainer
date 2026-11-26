@@ -15,6 +15,7 @@ from sklearn.linear_model import RidgeCV
 from transformer_model import benchmark_v1 as benchmark
 from transformer_model.benchmark_probe import BB_SCORE_ALPHAS, fit_masked_bbscore
 from transformer_model.benchmark_stats import (bbscore_floor_corrected_scores,
+                                               bbscore_transform_pearson,
                                                score_repeated_stimuli, finite_summary)
 
 
@@ -223,6 +224,12 @@ class ZWMPaperProtocolTests(unittest.TestCase):
         np.testing.assert_allclose(scores, [1.0, 200000.0, -100000.0])
         self.assertEqual(finite_summary(scores)['n_valid'], 3)
 
+    def test_cv_bbscore_uses_transformed_pearson_before_ceiling(self):
+        raw_cv = np.array([.5, .25, 1.0])
+        corrected = bbscore_floor_corrected_scores(
+            bbscore_transform_pearson(raw_cv), np.array([.8, .5, 1.0]))
+        np.testing.assert_allclose(corrected, [5/6, .8, 1.0])
+
     def test_report_separates_mean_median_and_bbscore_floor_ranking(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
@@ -239,6 +246,7 @@ class ZWMPaperProtocolTests(unittest.TestCase):
                     neuron_ids=np.array(['F/0', 'F/1', 'N/0', 'N/1']),
                     noise_corrected_pearson=np.array(score),
                     bbscore_pearson=np.full(4, bbscore),
+                    cv_pearson=np.full(4, .7 if index == 1 else .3),
                     split_half_reliability=np.array([1., 1., -.2, 1.]),
                     raw_pearson=np.full(4, .4),
                     n_repeated_images=np.full(4, 100))
@@ -247,7 +255,9 @@ class ZWMPaperProtocolTests(unittest.TestCase):
             self.assertEqual(report['best_layer'], benchmark.LAYERS[0])
             self.assertEqual(report['best_median_layer'], benchmark.LAYERS[1])
             self.assertEqual(report['best_bbscore_floor_layer'], benchmark.LAYERS[0])
+            self.assertEqual(report['best_cv_bbscore_floor_layer'], benchmark.LAYERS[1])
             self.assertEqual(report['layers'][0]['bbscore_floor']['n_valid'], 4)
+            self.assertEqual(report['layers'][0]['cv_bbscore_floor']['n_valid'], 4)
             self.assertEqual(report['layers'][0]['noise_corrected']['n_valid'], 4)
 
 

@@ -125,3 +125,10 @@ def bbscore_floor_corrected_scores(pearson_transformed, split_half_reliability):
         raise ValueError('Transformed Pearson and reliability shapes differ')
     with np.errstate(divide='ignore', invalid='ignore'):
         return scores / np.maximum(reliability, 1e-6)
+
+
+def bbscore_transform_pearson(raw_pearson):
+    """BBScore metrics/utils.py's transform of per-unit Pearson correlation."""
+    raw = np.asarray(raw_pearson, dtype=np.float64)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return np.where(raw == 1.0, 1.0, (2.0 * raw) / (1.0 + raw))
